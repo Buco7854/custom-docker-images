@@ -33,5 +33,6 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: yagpdb_docker/Dockerfile
           push: true
           tags: ghcr.io/${{ env.OWNER }}/yagpdb:latest
