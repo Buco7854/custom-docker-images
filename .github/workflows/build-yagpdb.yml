@@ -19,6 +19,9 @@ jobs:
           repository: 'botlabs-gg/yagpdb'
           ref: 'master'
 
+      - name: Set lowercase owner
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -31,4 +34,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/yagpdb:latest
+          tags: ghcr.io/${{ env.OWNER }}/yagpdb:latest
