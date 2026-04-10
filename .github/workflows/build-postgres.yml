@@ -1,0 +1,62 @@
+name: Build Custom Postgres Images
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # Daily at 3 AM UTC — picks up latest official Postgres patches
+  push:
+    paths:
+      - 'postgres/**' # Also triggers immediately when you edit or add a Dockerfile
+  workflow_dispatch:
+
+jobs:
+  # Job 1: Dynamically discover folders — just add a new folder to postgres/ and it auto-builds
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.get-folders.outputs.tags }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate matrix from folder names
+        id: get-folders
+        shell: python
+        run: |
+          import os, json
+
+          path = 'postgres'
+          folders = sorted([f.name for f in os.scandir(path) if f.is_dir()])
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write(f"tags={json.dumps(folders)}\n")
+
+  # Job 2: Build each image in parallel
+  build-postgres:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJson(needs.setup-matrix.outputs.tags) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Postgres image — ${{ matrix.tag }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./postgres/${{ matrix.tag }}
+          pull: true  # Forces pulling the latest official Postgres base image before building
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/postgres:${{ matrix.tag }}
