@@ -2,7 +2,7 @@ name: Build Caddy with Cloudflare DNS
 
 on:
   schedule:
-    - cron: '0 3 * * 0' # Weekly on Sunday at 3:00 AM UTC
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:
