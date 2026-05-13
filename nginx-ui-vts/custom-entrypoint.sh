@@ -15,6 +15,12 @@ cleanup() {
 }
 trap cleanup TERM INT
 
+# --- CrowdSec bouncer config (renders .local from env, or disables snippet) -
+/usr/local/bin/render-bouncer-conf.sh || {
+    echo "[entrypoint] bouncer config rendering failed — aborting" >&2
+    exit 1
+}
+
 # --- reload API ------------------------------------------------------------
 if [ -n "${RELOAD_API_KEY:-}" ]; then
     /usr/local/bin/reload-api.sh &

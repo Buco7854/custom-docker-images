@@ -1,13 +1,23 @@
-# Example stack: nginx-ui-vts + Certwarden + CrowdSec.
+# Example stack: nginx-ui-vts + Certwarden + CrowdSec (LAPI + AppSec)
+# + CrowdSec nginx lua bouncer + firewall bouncer + CrowdSec web UI.
 #
-# Replace the `image:` for nginx-ui-vts with your own GHCR tag.
-# Required env vars (e.g. in a .env file alongside this compose):
+# Required env vars (.env file alongside this compose):
 #   RELOAD_API_KEY=<long random string>
+#   CROWDSEC_BOUNCER_API_KEY=<key from `cscli bouncers add nginx-bouncer`>
+#   CROWDSEC_UI_USER, CROWDSEC_UI_PASSWORD
+#   DATA_PATH=/srv/crowdsec/data   (host path for crowdsec state + web UI cache)
+#   CROWDSEC_CONFIG_PATH=./crowdsec/config   (host path with parsers, whitelists, profiles)
 #   TZ=Europe/Paris
 #
-# Adjust the volume bind paths (./nginx, ./crowdsec, ./certwarden) to match
-# where you keep these configs on the host. Certs are shared between
-# certwarden and nginx-ui via the named volume `certs`.
+# First-time setup:
+#   1. docker compose up -d crowdsec
+#   2. docker exec crowdsec cscli bouncers add nginx-bouncer
+#      -> copy the API key into .env as CROWDSEC_BOUNCER_API_KEY
+#   3. docker exec crowdsec cscli collections install \
+#        crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+#   4. docker compose up -d
+#   5. (optional) docker exec crowdsec cscli bouncers add firewall-bouncer
+#      -> put the key in crowdsec/bouncer.yaml
 
 services:
 
@@ -20,22 +30,39 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "443:443/udp"      # HTTP/3
-      - "9000:9000"        # nginx-ui web UI (loopback-only is safer in prod)
-      - "127.0.0.1:9010:9010"  # reload API — keep off the public network
+      - "443:443/udp"          # HTTP/3
+      - "9000:9000"            # nginx-ui web UI
+      - "127.0.0.1:9010:9010"  # reload API — loopback only
     environment:
       - TZ=${TZ:-UTC}
+      # Reload API
       - RELOAD_API_KEY=${RELOAD_API_KEY:?RELOAD_API_KEY must be set in .env}
       - RELOAD_API_PORT=9010
+      # nginx-ui DB (for the maintenance cron)
       - NGINX_UI_DB_PATH=/etc/nginx-ui/database.db
+      # Cron (mount your own crontab and point this at it)
       - CRONTAB_FILE=/etc/cron.d/nginx-ui.crontab
+      # CrowdSec lua bouncer
+      - CROWDSEC_BOUNCER_ENABLED=true
+      - CROWDSEC_LAPI_URL=http://crowdsec:8080
+      - CROWDSEC_BOUNCER_API_KEY=${CROWDSEC_BOUNCER_API_KEY:?run `cscli bouncers add nginx-bouncer` first}
+      - CROWDSEC_MODE=stream
+      - CROWDSEC_UPDATE_FREQUENCY=10
+      # AppSec (WAF)
+      - CROWDSEC_APPSEC_URL=http://crowdsec:7422
+      - CROWDSEC_APPSEC_FAILURE_ACTION=passthrough
+      - CROWDSEC_APPSEC_DROP_UNREADABLE_BODY=true
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./nginx/sites-available:/etc/nginx/sites-available
       - ./nginx/sites-enabled:/etc/nginx/sites-enabled
       - ./nginx/snippets:/etc/nginx/snippets
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/crontab:/etc/cron.d/nginx-ui.crontab:ro   # <- your cron jobs
+      - ./nginx/crontab:/etc/cron.d/nginx-ui.crontab:ro
+      # Override the bouncer's ban / captcha pages — mount your customised
+      # HTML on top of the defaults.
+      - ./crowdsec/templates/ban.html:/var/lib/crowdsec/lua/templates/ban.html:ro
+      - ./crowdsec/templates/captcha.html:/var/lib/crowdsec/lua/templates/captcha.html:ro
       - ./www:/var/www
       - nginx_ui_data:/etc/nginx-ui
       - nginx_logs:/var/log/nginx
@@ -45,6 +72,9 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+    depends_on:
+      crowdsec:
+        condition: service_healthy
 
   certwarden:
     image: ghcr.io/gregtwallace/certwarden:latest
@@ -52,7 +82,6 @@ services:
     restart: unless-stopped
     environment:
       - TZ=${TZ:-UTC}
-      # Used by the post-issuance script to call back into nginx-ui
       - NGINX_UI_HOST=nginx-ui
       - NGINX_UI_RELOAD_PORT=9010
       - RELOAD_API_KEY=${RELOAD_API_KEY}
@@ -73,13 +102,30 @@ services:
     restart: unless-stopped
     environment:
       - TZ=${TZ:-UTC}
-      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/http-cve crowdsecurity/base-http-scenarios
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/http-cve crowdsecurity/base-http-scenarios crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
       - GID=1000
+    ports:
+      # Loopback-only so the firewall bouncer (network_mode: host) can reach
+      # LAPI. The nginx lua bouncer reaches LAPI via the compose network DNS
+      # name (crowdsec:8080), not this published port.
+      - "127.0.0.1:8080:8080"
+    expose:
+      - "7422"   # AppSec (compose-network only)
     volumes:
-      - crowdsec_db:/var/lib/crowdsec/data
-      - crowdsec_conf:/etc/crowdsec
-      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.d/nginx.yaml:ro
+      # Persistent state (DB, machines, decisions). Host bind so it survives
+      # container rebuilds and you can back it up.
+      - ${DATA_PATH:?DATA_PATH must point at the crowdsec data dir on the host}:/var/lib/crowdsec/data
+      # Bind-mounted config: your parsers, whitelists, profiles, acquis,
+      # appsec configs live here, version-controlled.
+      - ${CROWDSEC_CONFIG_PATH:-./crowdsec/config}:/etc/crowdsec
+      # Read nginx logs for parsing.
       - nginx_logs:/var/log/nginx:ro
+    healthcheck:
+      test: ["CMD", "cscli", "lapi", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   crowdsec-firewall-bouncer:
     image: crowdsecurity/crowdsec-firewall-bouncer:latest
@@ -90,14 +136,41 @@ services:
       - NET_ADMIN
       - NET_RAW
     depends_on:
-      - crowdsec
+      crowdsec:
+        condition: service_healthy
     volumes:
       - ./crowdsec/bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+
+  crowdsec-web-ui:
+    image: ghcr.io/theduffman85/crowdsec-web-ui:latest
+    container_name: crowdsec_web_ui
+    restart: unless-stopped
+    ports:
+      - "${CROWDSEC_UI_PORT:-3000}:3000"
+    environment:
+      - CROWDSEC_URL=${CROWDSEC_API_URL:-http://crowdsec:8080}
+      - CROWDSEC_USER=${CROWDSEC_UI_USER}
+      - CROWDSEC_PASSWORD=${CROWDSEC_UI_PASSWORD}
+      - CROWDSEC_LOOKBACK_PERIOD=${CROWDSEC_LOOKBACK:-24h}
+      - CROWDSEC_REFRESH_INTERVAL=${CROWDSEC_REFRESH:-10}
+      - CROWDSEC_IDLE_REFRESH_INTERVAL=${CROWDSEC_IDLE_REFRESH:-60}
+      - CROWDSEC_IDLE_THRESHOLD=${CROWDSEC_IDLE_LIMIT:-300}
+      - CROWDSEC_FULL_REFRESH_INTERVAL=${CROWDSEC_CACHE_REFRESH:-300}
+      - CROWDSEC_ALERT_INCLUDE_ORIGINS=${CROWDSEC_ALERT_INCLUDE_ORIGINS:-}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGINS=${CROWDSEC_ALERT_EXCLUDE_ORIGINS:-}
+      - CROWDSEC_ALERT_INCLUDE_CAPI=${CROWDSEC_ALERT_INCLUDE_CAPI:-true}
+      - CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY:-true}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY:-false}
+    volumes:
+      - ${DATA_PATH}:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      crowdsec:
+        condition: service_healthy
 
 volumes:
   nginx_ui_data:
   nginx_logs:
   certwarden_data:
-  crowdsec_db:
-  crowdsec_conf:
   certs:
