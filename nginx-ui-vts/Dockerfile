@@ -57,13 +57,41 @@ RUN set -eux; \
     mv "nginx-${NGINX_VERSION}" nginx-src; \
     rm nginx.tar.gz
 
-# VTS, plus required deps for lua-nginx-module (ngx_devel_kit) and the lua
-# module itself. Pin the lua-nginx-module to a known-good tag for reproducibility.
-ARG NDK_VERSION=v0.3.3
-ARG LUA_NGINX_VERSION=v0.10.27
-RUN git clone --depth=1 https://github.com/vozlt/nginx-module-vts.git
-RUN git clone --depth=1 --branch ${NDK_VERSION}        https://github.com/vision5/ngx_devel_kit.git
-RUN git clone --depth=1 --branch ${LUA_NGINX_VERSION}  https://github.com/openresty/lua-nginx-module.git
+# Resolve module versions at build time. Empty ARG => fetch the latest release
+# tag from GitHub. Pass a specific version as a --build-arg to override.
+ARG NDK_VERSION=
+ARG LUA_NGINX_VERSION=
+ARG VTS_VERSION=
+ARG CS_NGINX_BOUNCER_VERSION=
+
+# Resolves "latest" tag for a repo (owner/repo), prints it on stdout. Aborts
+# the build on failure rather than silently falling back, so we never produce
+# an image with mystery versions.
+RUN set -eux; \
+    cat > /usr/local/bin/gh-latest-tag <<'SH'
+#!/bin/sh
+set -eu
+repo="$1"
+override="${2:-}"
+if [ -n "$override" ]; then echo "$override"; exit 0; fi
+url="https://api.github.com/repos/${repo}/releases/latest"
+tag="$(curl -fsSL "$url" | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*"\([^"]\+\)"$/\1/')"
+if [ -z "$tag" ]; then
+    echo "ERROR: could not resolve latest tag for $repo from $url" >&2
+    exit 1
+fi
+echo "$tag"
+SH
+RUN chmod +x /usr/local/bin/gh-latest-tag
+
+RUN set -eux; \
+    NDK_VERSION="$(gh-latest-tag vision5/ngx_devel_kit            "${NDK_VERSION}")"; \
+    LUA_NGINX_VERSION="$(gh-latest-tag openresty/lua-nginx-module "${LUA_NGINX_VERSION}")"; \
+    VTS_VERSION="$(gh-latest-tag vozlt/nginx-module-vts           "${VTS_VERSION}")"; \
+    echo "Using: ndk=$NDK_VERSION lua=$LUA_NGINX_VERSION vts=$VTS_VERSION"; \
+    git clone --depth=1 --branch "$VTS_VERSION"        https://github.com/vozlt/nginx-module-vts.git; \
+    git clone --depth=1 --branch "$NDK_VERSION"        https://github.com/vision5/ngx_devel_kit.git; \
+    git clone --depth=1 --branch "$LUA_NGINX_VERSION"  https://github.com/openresty/lua-nginx-module.git
 
 # Bake custom HTML dashboard into the VTS module
 COPY status.html /tmp/status.html
@@ -95,16 +123,45 @@ RUN set -eux; \
 
 # Build the cs-nginx-bouncer release tarball. `make release` clones the
 # matching lua-cs-bouncer at the version pinned in the bouncer's Makefile and
-# produces a tarball with the canonical install layout.
-ARG CS_NGINX_BOUNCER_VERSION=v1.1.3
-RUN git clone --depth=1 --branch ${CS_NGINX_BOUNCER_VERSION} \
-        https://github.com/crowdsecurity/cs-nginx-bouncer.git /build/cs-nginx-bouncer
+# produces a tarball with the canonical install layout. Version resolved
+# dynamically (latest release tag) unless CS_NGINX_BOUNCER_VERSION is set.
 RUN set -eux; \
+    CS_NGINX_BOUNCER_VERSION="$(gh-latest-tag crowdsecurity/cs-nginx-bouncer "${CS_NGINX_BOUNCER_VERSION}")"; \
+    echo "Using cs-nginx-bouncer=$CS_NGINX_BOUNCER_VERSION"; \
+    git clone --depth=1 --branch "$CS_NGINX_BOUNCER_VERSION" \
+        https://github.com/crowdsecurity/cs-nginx-bouncer.git /build/cs-nginx-bouncer; \
     cd /build/cs-nginx-bouncer; \
     make release; \
     mkdir -p /build/bouncer-extracted; \
-    tar xzf crowdsec-nginx-bouncer.tgz -C /build/bouncer-extracted --strip-components=1; \
-    ls -la /build/bouncer-extracted
+    tar xzf crowdsec-nginx-bouncer.tgz -C /build/bouncer-extracted --strip-components=1
+
+# Assert the release tarball has the structure we expect. If upstream
+# restructures it, the build fails LOUDLY here rather than silently producing
+# a broken image. Anything missing is listed so the fix is obvious.
+RUN set -eux; \
+    echo "--- cs-nginx-bouncer release contents ---"; \
+    find /build/bouncer-extracted -maxdepth 3 -printf '%P\n' | sort; \
+    echo "-----------------------------------------"; \
+    fail=0; \
+    for path in \
+        lua-mod \
+        templates \
+        templates/ban.html \
+        templates/captcha.html \
+        nginx/crowdsec_nginx.conf \
+        crowdsec-nginx-bouncer.conf \
+    ; do \
+        if [ ! -e "/build/bouncer-extracted/$path" ]; then \
+            echo "ASSERT FAIL: /build/bouncer-extracted/$path is missing" >&2; \
+            fail=1; \
+        fi; \
+    done; \
+    if [ "$fail" -ne 0 ]; then \
+        echo "" >&2; \
+        echo "cs-nginx-bouncer release layout changed. Update the COPY/install" >&2; \
+        echo "logic in the Dockerfile to match the new structure." >&2; \
+        exit 1; \
+    fi
 
 ############################################################
 # Stage 3: final image on top of nginx-ui
@@ -171,27 +228,19 @@ RUN set -eux; \
     rm -rf /tmp/mods /tmp/modules_path
 
 # Install CrowdSec nginx bouncer assets into their canonical locations.
-# - lua-mod/  -> /usr/local/lua/crowdsec/
-# - templates/ -> /var/lib/crowdsec/lua/templates/
-# - nginx/crowdsec_nginx.conf -> /etc/nginx/conf.d/crowdsec_nginx.conf
-# - crowdsec-nginx-bouncer.conf -> /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+# Layout was already asserted in the builder stage, so we install
+# unconditionally here — any failure means our COPY didn't pull what we
+# expected, which is itself a bug worth surfacing.
 COPY --from=builder /build/bouncer-extracted /tmp/bouncer
 RUN set -eux; \
     mkdir -p /usr/local/lua/crowdsec /var/lib/crowdsec/lua/templates \
              /etc/crowdsec/bouncers /etc/nginx/conf.d; \
-    if [ -d /tmp/bouncer/lua-mod ]; then \
-        cp -r /tmp/bouncer/lua-mod/. /usr/local/lua/crowdsec/; \
-    fi; \
-    if [ -d /tmp/bouncer/templates ]; then \
-        cp -r /tmp/bouncer/templates/. /var/lib/crowdsec/lua/templates/; \
-    fi; \
-    if [ -f /tmp/bouncer/nginx/crowdsec_nginx.conf ]; then \
-        cp /tmp/bouncer/nginx/crowdsec_nginx.conf /etc/nginx/conf.d/crowdsec_nginx.conf; \
-    fi; \
-    if [ -f /tmp/bouncer/crowdsec-nginx-bouncer.conf ]; then \
-        cp /tmp/bouncer/crowdsec-nginx-bouncer.conf \
-           /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
-    fi; \
+    cp -r /tmp/bouncer/lua-mod/.    /usr/local/lua/crowdsec/; \
+    cp -r /tmp/bouncer/templates/.  /var/lib/crowdsec/lua/templates/; \
+    cp /tmp/bouncer/nginx/crowdsec_nginx.conf \
+       /etc/nginx/conf.d/crowdsec_nginx.conf; \
+    cp /tmp/bouncer/crowdsec-nginx-bouncer.conf \
+       /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
     rm -rf /tmp/bouncer
 
 # Scripts: reload API, maintenance, security.txt renewal, entrypoint
@@ -229,6 +278,25 @@ ENV RELOAD_API_PORT=9010 \
     CROWDSEC_MODE=stream \
     CROWDSEC_BAN_TEMPLATE_PATH=/var/lib/crowdsec/lua/templates/ban.html \
     CROWDSEC_CAPTCHA_TEMPLATE_PATH=/var/lib/crowdsec/lua/templates/captcha.html
+
+# Build-time smoke check: verify all three .so files are present at the
+# discovered modules path, and that `nginx -t` succeeds with the bouncer
+# disabled (the bouncer's init_by_lua_block needs a running LAPI, so it
+# can't be exercised here). Fails the build if either check trips.
+RUN set -eux; \
+    MODULES_PATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/^--modules-path=//' || echo /usr/lib/nginx/modules)"; \
+    for so in ngx_http_vhost_traffic_status_module.so ndk_http_module.so ngx_http_lua_module.so; do \
+        if [ ! -f "$MODULES_PATH/$so" ]; then \
+            echo "SMOKE FAIL: $so not present at $MODULES_PATH" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    # Move the bouncer snippet aside, run nginx -t, restore it.
+    snippet=/etc/nginx/conf.d/crowdsec_nginx.conf; \
+    if [ -f "$snippet" ]; then mv "$snippet" "${snippet}.smoke-backup"; fi; \
+    nginx -t; \
+    if [ -f "${snippet}.smoke-backup" ]; then mv "${snippet}.smoke-backup" "$snippet"; fi; \
+    echo "smoke check OK"
 
 EXPOSE 9010
 
