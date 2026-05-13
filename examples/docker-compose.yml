@@ -1,0 +1,103 @@
+# Example stack: nginx-ui-vts + Certwarden + CrowdSec.
+#
+# Replace the `image:` for nginx-ui-vts with your own GHCR tag.
+# Required env vars (e.g. in a .env file alongside this compose):
+#   RELOAD_API_KEY=<long random string>
+#   TZ=Europe/Paris
+#
+# Adjust the volume bind paths (./nginx, ./crowdsec, ./certwarden) to match
+# where you keep these configs on the host. Certs are shared between
+# certwarden and nginx-ui via the named volume `certs`.
+
+services:
+
+  nginx-ui:
+    image: ghcr.io/buco7854/nginx-ui-vts:latest
+    container_name: nginx-ui
+    restart: unless-stopped
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"      # HTTP/3
+      - "9000:9000"        # nginx-ui web UI (loopback-only is safer in prod)
+      - "127.0.0.1:9010:9010"  # reload API — keep off the public network
+    environment:
+      - TZ=${TZ:-UTC}
+      - RELOAD_API_KEY=${RELOAD_API_KEY:?RELOAD_API_KEY must be set in .env}
+      - RELOAD_API_PORT=9010
+      - NGINX_UI_DB_PATH=/etc/nginx-ui/database.db
+      - CRONTAB_FILE=/etc/cron.d/nginx-ui.crontab
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/sites-available:/etc/nginx/sites-available
+      - ./nginx/sites-enabled:/etc/nginx/sites-enabled
+      - ./nginx/snippets:/etc/nginx/snippets
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/crontab:/etc/cron.d/nginx-ui.crontab:ro   # <- your cron jobs
+      - ./www:/var/www
+      - nginx_ui_data:/etc/nginx-ui
+      - nginx_logs:/var/log/nginx
+      - certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9010/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  certwarden:
+    image: ghcr.io/gregtwallace/certwarden:latest
+    container_name: certwarden
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-UTC}
+      # Used by the post-issuance script to call back into nginx-ui
+      - NGINX_UI_HOST=nginx-ui
+      - NGINX_UI_RELOAD_PORT=9010
+      - RELOAD_API_KEY=${RELOAD_API_KEY}
+    ports:
+      - "4050:4050"
+      - "4055:4055"
+      - "4060:4060"
+      - "4065:4065"
+      - "4070:4070"
+    volumes:
+      - certwarden_data:/app/data
+      - ./certwarden-scripts:/scripts:ro
+      - certs:/certs
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-UTC}
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/http-cve crowdsecurity/base-http-scenarios
+      - GID=1000
+    volumes:
+      - crowdsec_db:/var/lib/crowdsec/data
+      - crowdsec_conf:/etc/crowdsec
+      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.d/nginx.yaml:ro
+      - nginx_logs:/var/log/nginx:ro
+
+  crowdsec-firewall-bouncer:
+    image: crowdsecurity/crowdsec-firewall-bouncer:latest
+    container_name: crowdsec-bouncer
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - crowdsec
+    volumes:
+      - ./crowdsec/bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+
+volumes:
+  nginx_ui_data:
+  nginx_logs:
+  certwarden_data:
+  crowdsec_db:
+  crowdsec_conf:
+  certs:
