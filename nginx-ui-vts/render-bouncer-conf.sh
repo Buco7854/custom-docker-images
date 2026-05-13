@@ -1,20 +1,25 @@
 #!/bin/sh
-# Render the CrowdSec nginx bouncer config from env vars on each container
-# start. Writes to a .local override file, which takes precedence over the
-# main conf (per the upstream bouncer's load order).
+# Manage the CrowdSec nginx bouncer at container start.
 #
-# Behavior:
-#   * If CROWDSEC_BOUNCER_ENABLED is not truthy, the lua bouncer config
-#     snippet in /etc/nginx/conf.d/ is disabled (renamed) so nginx starts
-#     without trying to talk to a CrowdSec LAPI.
-#   * If enabled, write .local overrides and ensure the snippet is active.
+# What it does:
+#   1. Renders /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf.local from
+#      env vars. The bouncer merges .local on top of the shipped .conf, so
+#      we only write the user's overrides — upstream defaults survive.
+#   2. Symlinks /etc/nginx/crowdsec-include.conf to either the enabled or
+#      disabled variant in /usr/share/cs-nginx-bouncer/.
+#
+# How the user wires it up:
+#   - Add ONE line to nginx.conf (inside http {}):
+#         include /etc/nginx/crowdsec-include.conf;
+#   - Toggle CROWDSEC_BOUNCER_ENABLED at runtime; the include shim flips.
 
 set -eu
 
 BOUNCER_CONF=/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
 BOUNCER_LOCAL=/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf.local
-NGINX_SNIPPET=/etc/nginx/conf.d/crowdsec_nginx.conf
-NGINX_SNIPPET_DISABLED=/etc/nginx/conf.d/crowdsec_nginx.conf.disabled
+INCLUDE_SHIM=/etc/nginx/crowdsec-include.conf
+INCLUDE_ENABLED=/usr/share/cs-nginx-bouncer/crowdsec-include.conf.enabled
+INCLUDE_DISABLED=/usr/share/cs-nginx-bouncer/crowdsec-include.conf.disabled
 
 is_truthy() {
     case "${1:-}" in
@@ -23,22 +28,23 @@ is_truthy() {
     esac
 }
 
-if ! is_truthy "${CROWDSEC_BOUNCER_ENABLED:-false}"; then
-    # Disable the nginx snippet so nginx doesn't try to init the bouncer.
-    if [ -f "$NGINX_SNIPPET" ] && [ ! -f "$NGINX_SNIPPET_DISABLED" ]; then
-        mv "$NGINX_SNIPPET" "$NGINX_SNIPPET_DISABLED"
-        echo "[bouncer] disabled (CROWDSEC_BOUNCER_ENABLED=false)"
-    fi
-    exit 0
-fi
+mkdir -p "$(dirname "$INCLUDE_SHIM")"
 
-# Re-enable the snippet if previously disabled.
-if [ -f "$NGINX_SNIPPET_DISABLED" ] && [ ! -f "$NGINX_SNIPPET" ]; then
-    mv "$NGINX_SNIPPET_DISABLED" "$NGINX_SNIPPET"
+if ! is_truthy "${CROWDSEC_BOUNCER_ENABLED:-false}"; then
+    ln -sfn "$INCLUDE_DISABLED" "$INCLUDE_SHIM"
+    # Clear any stale .local so an enabled-then-disabled flip doesn't leave
+    # a key file pointing at nothing if the user later re-enables manually.
+    rm -f "$BOUNCER_LOCAL"
+    echo "[bouncer] disabled (CROWDSEC_BOUNCER_ENABLED=false)"
+    exit 0
 fi
 
 if [ ! -f "$BOUNCER_CONF" ]; then
     echo "[bouncer] $BOUNCER_CONF missing — bouncer assets not installed?" >&2
+    exit 1
+fi
+if [ ! -f "$INCLUDE_ENABLED" ]; then
+    echo "[bouncer] $INCLUDE_ENABLED missing — image is broken" >&2
     exit 1
 fi
 
@@ -84,4 +90,7 @@ mkdir -p "$(dirname "$BOUNCER_LOCAL")"
 } > "$BOUNCER_LOCAL"
 
 chmod 640 "$BOUNCER_LOCAL"
-echo "[bouncer] rendered $BOUNCER_LOCAL (LAPI=$CROWDSEC_LAPI_URL, mode=${CROWDSEC_MODE:-stream}, appsec=${CROWDSEC_APPSEC_URL:-off})"
+ln -sfn "$INCLUDE_ENABLED" "$INCLUDE_SHIM"
+
+echo "[bouncer] enabled (LAPI=$CROWDSEC_LAPI_URL, mode=${CROWDSEC_MODE:-stream}, appsec=${CROWDSEC_APPSEC_URL:-off})"
+echo "[bouncer] reminder: nginx.conf must contain   include /etc/nginx/crowdsec-include.conf;   inside http {}"

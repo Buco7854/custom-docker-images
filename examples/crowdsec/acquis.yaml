@@ -1,6 +1,7 @@
-# CrowdSec log acquisition for nginx running in the nginx-ui-vts container.
-# nginx-ui writes access/error logs to /var/log/nginx, which we share via
-# the `nginx_logs` named volume.
+# CrowdSec acquisition sources.
+# This file goes inside the bind-mounted /etc/crowdsec dir.
+# CrowdSec also reads everything in /etc/crowdsec/acquis.d/.
+
 filenames:
   - /var/log/nginx/access.log
   - /var/log/nginx/*access.log
@@ -12,3 +13,11 @@ filenames:
   - /var/log/nginx/*error.log
 labels:
   type: nginx
+---
+# AppSec listener — the bouncer forwards requests here for WAF evaluation.
+listen_addr: 0.0.0.0:7422
+appsec_config: crowdsecurity/appsec-default
+name: appsec
+source: appsec
+labels:
+  type: appsec

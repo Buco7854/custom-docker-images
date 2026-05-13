@@ -10,7 +10,7 @@ a small reload API, and `supercronic` for periodic maintenance.
 |---|---|
 | Dynamic modules | `nginx-module-vts`, `ngx_devel_kit`, `ngx_http_lua_module` — all built per-image against the exact nginx version shipped by the base, with `--with-compat`. |
 | VTS dashboard | `status.html` is baked into the VTS module via `tplToDefine.sh` at build time. |
-| CrowdSec lua bouncer | `cs-nginx-bouncer` installed at canonical paths (`/usr/local/lua/crowdsec/`, `/var/lib/crowdsec/lua/templates/`, etc.). Off by default — flip on with `CROWDSEC_BOUNCER_ENABLED=true`. Supports AppSec/WAF. |
+| CrowdSec lua bouncer | `cs-nginx-bouncer` installed at canonical paths (`/usr/local/lua/crowdsec/`, `/var/lib/crowdsec/lua/templates/`). The nginx snippet lives in `/usr/share/cs-nginx-bouncer/` so user bind mounts over `/etc/nginx` never hide it. Activated by adding **one line** to nginx.conf: `include /etc/nginx/crowdsec-include.conf;`. Off by default — flip on with `CROWDSEC_BOUNCER_ENABLED=true`. Supports AppSec/WAF. |
 | Reload API | `POST /reload` (auth: `X-API-Key: $RELOAD_API_KEY`) on `$RELOAD_API_PORT` (default 9010). Also `POST /test` (runs `nginx -t`), `GET /health`. |
 | Cron | `supercronic` reads `$CRONTAB_FILE` (default `/etc/cron.d/default.crontab`). Mount your own to override; set empty to disable. |
 | Maintenance scripts | `maintain-nginx-ui-db.sh`, `security-txt-renew.sh`, `nginx-body-cleanup.sh` |
@@ -69,6 +69,23 @@ volumes:
   - ./my-overrides.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf.local:ro
 ```
 (it must come after the entrypoint renders its version — easiest is to set `CROWDSEC_BOUNCER_ENABLED=false` and manage the file entirely yourself.)
+
+### How the bouncer gets loaded
+
+The bouncer's nginx snippet lives at `/usr/share/cs-nginx-bouncer/crowdsec_nginx.conf` — outside `/etc/nginx/`, so a wholesale bind mount of the config tree can't hide it. To activate it, your nginx.conf must contain one include inside `http {}`:
+
+```nginx
+http {
+    # ... other directives ...
+    include /etc/nginx/crowdsec-include.conf;
+}
+```
+
+The entrypoint manages that shim:
+- `CROWDSEC_BOUNCER_ENABLED=true` → `crowdsec-include.conf` symlinks to a file that includes the real snippet.
+- `CROWDSEC_BOUNCER_ENABLED=false` → `crowdsec-include.conf` symlinks to a comment-only stub.
+
+The example `nginx.conf` in [`../examples/nginx/`](../examples/nginx/nginx.conf) already has the include + the required `lua_*` directives at the http level.
 
 ## Reload API
 

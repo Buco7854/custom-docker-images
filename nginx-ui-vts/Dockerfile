@@ -227,20 +227,28 @@ RUN set -eux; \
     done; \
     rm -rf /tmp/mods /tmp/modules_path
 
-# Install CrowdSec nginx bouncer assets into their canonical locations.
-# Layout was already asserted in the builder stage, so we install
-# unconditionally here — any failure means our COPY didn't pull what we
-# expected, which is itself a bug worth surfacing.
+# Install CrowdSec nginx bouncer assets. Lua + templates + base config go to
+# their canonical locations. The nginx snippet goes to /usr/share/ (not
+# /etc/nginx/conf.d/) so that user bind mounts over /etc/nginx never hide it.
+# A user enables the snippet by adding ONE include directive to their
+# nginx.conf:  include /etc/nginx/crowdsec-include.conf;
+# That file is managed by the entrypoint based on CROWDSEC_BOUNCER_ENABLED.
 COPY --from=builder /build/bouncer-extracted /tmp/bouncer
 RUN set -eux; \
     mkdir -p /usr/local/lua/crowdsec /var/lib/crowdsec/lua/templates \
-             /etc/crowdsec/bouncers /etc/nginx/conf.d; \
+             /etc/crowdsec/bouncers /usr/share/cs-nginx-bouncer; \
     cp -r /tmp/bouncer/lua-mod/.    /usr/local/lua/crowdsec/; \
     cp -r /tmp/bouncer/templates/.  /var/lib/crowdsec/lua/templates/; \
     cp /tmp/bouncer/nginx/crowdsec_nginx.conf \
-       /etc/nginx/conf.d/crowdsec_nginx.conf; \
+       /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf; \
     cp /tmp/bouncer/crowdsec-nginx-bouncer.conf \
        /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
+    # Pre-render the two states the include shim can take. The entrypoint
+    # picks one based on CROWDSEC_BOUNCER_ENABLED and symlinks it into place.
+    printf 'include /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf;\n' \
+        > /usr/share/cs-nginx-bouncer/crowdsec-include.conf.enabled; \
+    printf '# CrowdSec bouncer disabled (CROWDSEC_BOUNCER_ENABLED=false)\n' \
+        > /usr/share/cs-nginx-bouncer/crowdsec-include.conf.disabled; \
     rm -rf /tmp/bouncer
 
 # Scripts: reload API, maintenance, security.txt renewal, entrypoint
@@ -280,9 +288,9 @@ ENV RELOAD_API_PORT=9010 \
     CROWDSEC_CAPTCHA_TEMPLATE_PATH=/var/lib/crowdsec/lua/templates/captcha.html
 
 # Build-time smoke check: verify all three .so files are present at the
-# discovered modules path, and that `nginx -t` succeeds with the bouncer
-# disabled (the bouncer's init_by_lua_block needs a running LAPI, so it
-# can't be exercised here). Fails the build if either check trips.
+# discovered modules path, the bouncer assets are staged, and the stock
+# nginx config still validates (the bouncer snippet is NOT auto-loaded;
+# it only takes effect once a user nginx.conf includes the shim).
 RUN set -eux; \
     MODULES_PATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/^--modules-path=//' || echo /usr/lib/nginx/modules)"; \
     for so in ngx_http_vhost_traffic_status_module.so ndk_http_module.so ngx_http_lua_module.so; do \
@@ -291,11 +299,17 @@ RUN set -eux; \
             exit 1; \
         fi; \
     done; \
-    # Move the bouncer snippet aside, run nginx -t, restore it.
-    snippet=/etc/nginx/conf.d/crowdsec_nginx.conf; \
-    if [ -f "$snippet" ]; then mv "$snippet" "${snippet}.smoke-backup"; fi; \
+    for f in /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf \
+             /usr/share/cs-nginx-bouncer/crowdsec-include.conf.enabled \
+             /usr/share/cs-nginx-bouncer/crowdsec-include.conf.disabled \
+             /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
+             /usr/local/lua/crowdsec/crowdsec.lua; do \
+        if [ ! -e "$f" ]; then \
+            echo "SMOKE FAIL: expected bouncer asset $f is missing" >&2; \
+            exit 1; \
+        fi; \
+    done; \
     nginx -t; \
-    if [ -f "${snippet}.smoke-backup" ]; then mv "${snippet}.smoke-backup" "$snippet"; fi; \
     echo "smoke check OK"
 
 EXPOSE 9010

@@ -5,11 +5,8 @@ mode: iptables
 update_frequency: 10s
 log_mode: stdout
 log_level: info
-# The bouncer runs with network_mode: host, but LAPI is inside the crowdsec
-# container on the compose network. Easiest path: publish LAPI on a host
-# loopback port (add `ports: - "127.0.0.1:8080:8080"` to the crowdsec service)
-# OR use the docker0 gateway: `api_url: http://172.17.0.1:8080/` if you
-# also publish 8080 to the bridge.
+# The bouncer runs with network_mode: host. The compose file publishes LAPI
+# on the host loopback (127.0.0.1:8080) specifically so this address works.
 api_url: http://127.0.0.1:8080/
 api_key: REPLACE_ME    # docker exec crowdsec cscli bouncers add firewall-bouncer
 disable_ipv6: false
