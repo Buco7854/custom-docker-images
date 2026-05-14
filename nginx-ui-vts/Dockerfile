@@ -261,32 +261,25 @@ RUN set -eux; \
     dpkg-deb -x "$deb" /build/bouncer-extracted; \
     dpkg-deb -x /build/lua-deb/libnginx-mod-http-lua_*.deb /build/lua-extracted
 
-# Assert both .debs have the structure we expect. If upstream restructures
-# either package, fail loudly here rather than silently producing a broken image.
+# Check both .debs ship the files we need — by filename, not by exact path.
+# Upstream sometimes moves things around between releases; we don't care
+# WHERE inside the tree, only that each named file is present somewhere.
+# The full file lists are printed first so any mismatch is obvious.
 RUN set -eux; \
     echo "--- crowdsec-nginx-bouncer .deb contents ---"; \
-    find /build/bouncer-extracted -maxdepth 4 -printf '%P\n' | sort; \
+    find /build/bouncer-extracted -type f | sort; \
     echo "--- libnginx-mod-http-lua .deb contents ---"; \
-    find /build/lua-extracted -maxdepth 4 -printf '%P\n' | sort; \
+    find /build/lua-extracted -type f | sort; \
     echo "--------------------------------------------"; \
     fail=0; \
-    for path in \
-        usr/lib/crowdsec/lua/crowdsec.lua \
-        var/lib/crowdsec/lua/templates/ban.html \
-        var/lib/crowdsec/lua/templates/captcha.html \
-        etc/nginx/conf.d/crowdsec_nginx.conf \
-        etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
-    ; do \
-        if [ ! -e "/build/bouncer-extracted/$path" ]; then \
-            echo "ASSERT FAIL: /build/bouncer-extracted/$path is missing" >&2; \
+    for filename in crowdsec.lua ban.html captcha.html crowdsec_nginx.conf crowdsec-nginx-bouncer.conf; do \
+        if ! find /build/bouncer-extracted -name "$filename" -print -quit | grep -q .; then \
+            echo "ASSERT FAIL: $filename not found anywhere in cs-nginx-bouncer .deb" >&2; \
             fail=1; \
         fi; \
     done; \
-    # The Debian lua-module .deb must at minimum ship the lua .so. NDK may
-    # be bundled in the same .deb or compiled into the lua module — we
-    # accept either.
-    if ! ls /build/lua-extracted/usr/lib/nginx/modules/ngx_http_lua_module.so >/dev/null 2>&1; then \
-        echo "ASSERT FAIL: ngx_http_lua_module.so not present in libnginx-mod-http-lua" >&2; \
+    if ! find /build/lua-extracted -name 'ngx_http_lua_module.so' -print -quit | grep -q .; then \
+        echo "ASSERT FAIL: ngx_http_lua_module.so not found in libnginx-mod-http-lua" >&2; \
         fail=1; \
     fi; \
     if [ "$fail" -ne 0 ]; then \
@@ -355,7 +348,7 @@ RUN set -eux; \
 #   10 = NDK (if present), 15 = lua, 90 = VTS.
 COPY --from=discover /tmp/modules_path /tmp/modules_path
 COPY --from=builder  /build/nginx-src/objs/ngx_http_vhost_traffic_status_module.so /tmp/mods/
-COPY --from=builder  /build/lua-extracted/usr/lib/nginx/modules/                   /tmp/lua-mods/
+COPY --from=builder  /build/lua-extracted /tmp/lua-extracted
 
 RUN set -eux; \
     MODULES_PATH="$(cat /tmp/modules_path)"; \
@@ -366,9 +359,11 @@ RUN set -eux; \
     printf 'load_module %s/ngx_http_vhost_traffic_status_module.so;\n' "$MODULES_PATH" \
         > /etc/nginx/modules-available/90-mod-vts.conf; \
     ln -sf /etc/nginx/modules-available/90-mod-vts.conf /etc/nginx/modules-enabled/90-mod-vts.conf; \
-    # NDK — only if Debian shipped it as a separate .so.
-    if [ -f /tmp/lua-mods/ndk_http_module.so ]; then \
-        mv /tmp/lua-mods/ndk_http_module.so "$MODULES_PATH/"; \
+    # NDK — only if Debian shipped it as a separate .so anywhere in the tree.
+    ndk_so="$(find /tmp/lua-extracted -name 'ndk_http_module.so' -print -quit || true)"; \
+    if [ -n "$ndk_so" ]; then \
+        echo "found separate NDK .so at $ndk_so"; \
+        mv "$ndk_so" "$MODULES_PATH/ndk_http_module.so"; \
         chmod 644 "$MODULES_PATH/ndk_http_module.so"; \
         printf 'load_module %s/ndk_http_module.so;\n' "$MODULES_PATH" \
             > /etc/nginx/modules-available/10-mod-ndk.conf; \
@@ -377,28 +372,36 @@ RUN set -eux; \
         echo "NDK is bundled into lua module — no separate load_module needed"; \
     fi; \
     # lua-nginx-module (always present, we asserted above).
-    mv /tmp/lua-mods/ngx_http_lua_module.so "$MODULES_PATH/"; \
+    lua_so="$(find /tmp/lua-extracted -name 'ngx_http_lua_module.so' -print -quit)"; \
+    mv "$lua_so" "$MODULES_PATH/ngx_http_lua_module.so"; \
     chmod 644 "$MODULES_PATH/ngx_http_lua_module.so"; \
     printf 'load_module %s/ngx_http_lua_module.so;\n' "$MODULES_PATH" \
         > /etc/nginx/modules-available/15-mod-lua.conf; \
     ln -sf /etc/nginx/modules-available/15-mod-lua.conf /etc/nginx/modules-enabled/15-mod-lua.conf; \
-    rm -rf /tmp/mods /tmp/lua-mods /tmp/modules_path
+    rm -rf /tmp/mods /tmp/lua-extracted /tmp/modules_path
 
-# Install the CrowdSec nginx bouncer assets at their canonical Debian-package
-# paths. The .deb installs the http-level snippet to /etc/nginx/conf.d/ — we
-# instead stash it at /usr/share/cs-nginx-bouncer/ so user bind mounts over
-# /etc/nginx don't hide it. Users enable it by adding ONE include line to
-# their nginx.conf:  include /etc/nginx/crowdsec-include.conf;
-# The shim is managed by the entrypoint based on CROWDSEC_BOUNCER_ENABLED.
+# Install the CrowdSec nginx bouncer assets. The .deb's internal layout
+# can change between releases, so we discover each named file via `find`
+# and install it at our canonical, stable destination. The http-level
+# nginx snippet is stashed at /usr/share/cs-nginx-bouncer/ rather than
+# /etc/nginx/conf.d/, so a wholesale user bind mount over /etc/nginx
+# can't hide it. Users enable it with one include line in nginx.conf:
+#   include /etc/nginx/crowdsec-include.conf;
+# That shim is managed by the entrypoint based on CROWDSEC_BOUNCER_ENABLED.
 COPY --from=builder /build/bouncer-extracted /tmp/bouncer
 RUN set -eux; \
     mkdir -p /usr/lib/crowdsec/lua /var/lib/crowdsec/lua/templates \
              /etc/crowdsec/bouncers /usr/share/cs-nginx-bouncer; \
-    cp -r /tmp/bouncer/usr/lib/crowdsec/lua/.            /usr/lib/crowdsec/lua/; \
-    cp -r /tmp/bouncer/var/lib/crowdsec/lua/templates/.  /var/lib/crowdsec/lua/templates/; \
-    cp /tmp/bouncer/etc/nginx/conf.d/crowdsec_nginx.conf \
+    # lua modules: copy the whole directory that contains crowdsec.lua.
+    crowdsec_lua_src="$(find /tmp/bouncer -name crowdsec.lua -print -quit)"; \
+    cp -r "$(dirname "$crowdsec_lua_src")/." /usr/lib/crowdsec/lua/; \
+    # templates: copy the whole directory that contains ban.html.
+    ban_src="$(find /tmp/bouncer -name ban.html -print -quit)"; \
+    cp -r "$(dirname "$ban_src")/." /var/lib/crowdsec/lua/templates/; \
+    # snippet + base config: copy the discovered single files.
+    cp "$(find /tmp/bouncer -name crowdsec_nginx.conf -print -quit)" \
        /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf; \
-    cp /tmp/bouncer/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
+    cp "$(find /tmp/bouncer -name crowdsec-nginx-bouncer.conf -print -quit)" \
        /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
     # Pre-render the two states the include shim can take. The entrypoint
     # picks one based on CROWDSEC_BOUNCER_ENABLED and symlinks it into place.
