@@ -1,4 +1,5 @@
-FROM postgres:18-bookworm
+ARG PG_BASE_TAG=18-bookworm
+FROM postgres:${PG_BASE_TAG}
 
 RUN apt update && \
     imageDeps='' && \

@@ -35,6 +35,35 @@ jobs:
         run: |
           echo "IMAGE=$(echo $IMAGE | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
+      # Resolve uozi/nginx-ui tag: prefer the manual workflow_dispatch input,
+      # else pick the newest semver tag on Docker Hub that is >= 7 days old.
+      - name: Resolve uozi/nginx-ui tag (>= 7 days old)
+        id: resolve_nginx_ui
+        run: |
+          set -euo pipefail
+          MANUAL='${{ github.event.inputs.nginx_ui_tag }}'
+          if [ -n "$MANUAL" ]; then
+            echo "Using manual nginx_ui_tag=${MANUAL}"
+            echo "tag=${MANUAL}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CUTOFF="$(date -u -d '7 days ago' +%s)"
+          TAG="$(curl -fsSL \
+                "https://hub.docker.com/v2/repositories/uozi/nginx-ui/tags?page_size=100" \
+              | jq -r --argjson cutoff "$CUTOFF" '
+                  .results
+                  | map(select(.name | test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")))
+                  | map(. + {ts: (.last_updated | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)})
+                  | map(select(.ts <= $cutoff))
+                  | sort_by(.ts) | reverse
+                  | .[0].name // empty')"
+          if [ -z "$TAG" ]; then
+            echo "Could not resolve a uozi/nginx-ui tag older than 7 days" >&2
+            exit 1
+          fi
+          echo "Resolved uozi/nginx-ui=${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,7 +76,7 @@ jobs:
           load: true
           platforms: linux/amd64
           build-args: |
-            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
+            NGINX_UI_TAG=${{ steps.resolve_nginx_ui.outputs.tag }}
             ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
@@ -139,7 +168,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
+            NGINX_UI_TAG=${{ steps.resolve_nginx_ui.outputs.tag }}
             ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}

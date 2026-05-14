@@ -1,4 +1,5 @@
-FROM postgres:15-bookworm
+ARG PG_BASE_TAG=15-bookworm
+FROM postgres:${PG_BASE_TAG}
 
 RUN apt update && \
     imageDeps='postgresql-15-cron' && \

@@ -12,14 +12,38 @@ jobs:
     steps:
       - name: Set lowercase owner
         run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+      # Pick the newest specific caddy version (X.Y.Z-builder) that is at
+      # least 7 days old on Docker Hub, instead of mutable :2-builder / :2.
+      - name: Resolve caddy tags (>= 7 days old)
+        id: resolve
+        run: |
+          set -euo pipefail
+          CUTOFF="$(date -u -d '7 days ago' +%s)"
+          BUILDER_TAG="$(curl -fsSL \
+                "https://hub.docker.com/v2/repositories/library/caddy/tags?page_size=100" \
+              | jq -r --argjson cutoff "$CUTOFF" '
+                  .results
+                  | map(select(.name | test("^2\\.[0-9]+\\.[0-9]+-builder$")))
+                  | map(. + {ts: (.last_updated | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)})
+                  | map(select(.ts <= $cutoff))
+                  | sort_by(.ts) | reverse
+                  | .[0].name // empty')"
+          if [ -z "$BUILDER_TAG" ]; then
+            echo "Could not resolve a caddy *-builder tag older than 7 days" >&2
+            exit 1
+          fi
+          RUNTIME_TAG="${BUILDER_TAG%-builder}"
+          echo "Using caddy builder=${BUILDER_TAG}, runtime=${RUNTIME_TAG}"
+          echo "builder_tag=${BUILDER_TAG}" >> "$GITHUB_OUTPUT"
+          echo "runtime_tag=${RUNTIME_TAG}" >> "$GITHUB_OUTPUT"
       - name: Create Dockerfile
         run: |
-          cat <<'EOF' > Dockerfile
-          FROM caddy:2-builder AS builder
-          RUN xcaddy build \
-              --with github.com/caddy-dns/cloudflare \
+          cat <<EOF > Dockerfile
+          FROM caddy:${{ steps.resolve.outputs.builder_tag }} AS builder
+          RUN xcaddy build \\
+              --with github.com/caddy-dns/cloudflare \\
               --with github.com/mholt/caddy-webdav
-          FROM caddy:2
+          FROM caddy:${{ steps.resolve.outputs.runtime_tag }}
           COPY --from=builder /usr/bin/caddy /usr/bin/caddy
           EOF
       - name: Log in to GitHub Container Registry

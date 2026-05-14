@@ -49,6 +49,33 @@ jobs:
       - name: Set lowercase owner
         run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
 
+      # Pick the newest specific Postgres minor (e.g. 15.9-bookworm) that is
+      # at least 7 days old on Docker Hub, instead of mutable :15-bookworm.
+      # The major version is derived from the folder name (e.g. "15-cron" -> 15).
+      - name: Resolve postgres base tag (>= 7 days old)
+        id: resolve
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          MAJOR="${TAG%%-*}"
+          CUTOFF="$(date -u -d '7 days ago' +%s)"
+          BASE_TAG="$(curl -fsSL \
+                "https://hub.docker.com/v2/repositories/library/postgres/tags?page_size=100" \
+              | jq -r --arg pat "^${MAJOR}\\.[0-9]+-bookworm$" --argjson cutoff "$CUTOFF" '
+                  .results
+                  | map(select(.name | test($pat)))
+                  | map(. + {ts: (.last_updated | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)})
+                  | map(select(.ts <= $cutoff))
+                  | sort_by(.ts) | reverse
+                  | .[0].name // empty')"
+          if [ -z "$BASE_TAG" ]; then
+            echo "Could not resolve postgres:${MAJOR}.x-bookworm tag older than 7 days" >&2
+            exit 1
+          fi
+          echo "Using postgres:${BASE_TAG} as base for ${TAG}"
+          echo "base_tag=${BASE_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -60,6 +87,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./postgres/${{ matrix.tag }}
-          pull: true  # Forces pulling the latest official Postgres base image before building
+          pull: true  # Forces pulling the resolved Postgres base image before building
           push: true
+          build-args: |
+            PG_BASE_TAG=${{ steps.resolve.outputs.base_tag }}
           tags: ghcr.io/${{ env.OWNER }}/postgres:${{ matrix.tag }}
