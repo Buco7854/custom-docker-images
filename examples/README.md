@@ -28,6 +28,7 @@ the stack stays portable.
 | `./crowdsec_web_ui_data/` | `/app/data/` (crowdsec-web-ui) | web UI state — *separate* from LAPI DB |
 | `./certwarden_data/` | `/app/data/` (certwarden) | Certwarden DB + ACME account keys |
 | `./certwarden_scripts/` | `/scripts/` (certwarden, ro) | post-issuance hooks (shipped in this repo) |
+| `./bouncer_templates/{ban,captcha}.html` | `/var/lib/crowdsec/lua/templates/...` (nginx-ui, ro) | lua bouncer ban / captcha pages |
 | `./www/` | `/var/www/` (nginx-ui) | served content + ACME webroot |
 | `./nginx_crontab` | `/etc/cron.d/nginx-ui.crontab` (nginx-ui, ro) | supercronic schedule |
 
@@ -43,6 +44,9 @@ Docker auto-creates the relative dirs on first start.
 ├── nginx_crontab                     copied as a single file into the container
 ├── certwarden_scripts/               bind-mounted into certwarden
 │   └── write_cert.sh
+├── bouncer_templates/                lua bouncer ban / captcha pages
+│   ├── ban.html
+│   └── captcha.html
 └── etc/                              copy contents to /etc on the host
     ├── nginx/
     │   ├── nginx.conf                works as-is; edit to taste
@@ -110,7 +114,9 @@ docker compose up -d
 
 ## Custom ban / captcha pages
 
-Image ships sensible defaults. To override, create `./bouncer_templates/`
-next to this compose file with your own `ban.html` / `captcha.html`, then
-uncomment the two corresponding bind mounts in `docker-compose.yml`. The
-captcha template must contain `{{captcha_site_key}}` — see the bouncer docs.
+Edit `./bouncer_templates/ban.html` and `./bouncer_templates/captcha.html`
+in place — they're bind-mounted over the image defaults. The captcha
+template must contain `{{captcha_site_key}}`, which the bouncer substitutes
+with whatever you set as `CROWDSEC_CAPTCHA_SITE_KEY`. The starter
+`captcha.html` is wired for Cloudflare Turnstile; swap the script src and
+the element class for hcaptcha or reCAPTCHA if you prefer.

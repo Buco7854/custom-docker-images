@@ -16,6 +16,8 @@
 #   ./crowdsec_web_ui_data/           ->  /app/data            [crowdsec-web-ui]  (separate from crowdsec_data)
 #   ./certwarden_data/                ->  /app/data            [certwarden]
 #   ./certwarden_scripts/             ->  /scripts             [certwarden, ro]
+#   ./bouncer_templates/{ban,captcha}.html
+#                                     ->  /var/lib/crowdsec/lua/templates/  [nginx-ui, ro]
 #   ./www/                            ->  /var/www             [nginx-ui]
 #   ./nginx_crontab                   ->  /etc/cron.d/nginx-ui.crontab  [nginx-ui]
 #
@@ -71,10 +73,10 @@ services:
       - ./nginx_ui_data:/etc/nginx-ui
       - ./www:/var/www
       - ./nginx_crontab:/etc/cron.d/nginx-ui.crontab:ro
-      # Optional: custom ban/captcha pages. Drop your own HTML files next to
-      # this compose file and uncomment to override the image defaults.
-      # - ./bouncer_templates/ban.html:/var/lib/crowdsec/lua/templates/ban.html:ro
-      # - ./bouncer_templates/captcha.html:/var/lib/crowdsec/lua/templates/captcha.html:ro
+      # Lua bouncer ban/captcha pages. Edit the files under ./bouncer_templates/
+      # to customise; they overlay the image's defaults.
+      - ./bouncer_templates/ban.html:/var/lib/crowdsec/lua/templates/ban.html:ro
+      - ./bouncer_templates/captcha.html:/var/lib/crowdsec/lua/templates/captcha.html:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9010/health"]
       interval: 30s
