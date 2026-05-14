@@ -93,10 +93,21 @@ What's in place:
 
 - **Base image pinned by SHA256 digest**, not tag. Dependabot opens PRs when upstream `uozi/nginx-ui` changes; each bump is gated by smoke + CVE scan + cosign signing before publish.
 - **No `curl | bash` at build time.** The CrowdSec apt key is fetched over HTTPS and its **GPG fingerprint is verified** against a value pinned in the Dockerfile (`CROWDSEC_GPG_KEY_ID`) — build fails if it doesn't match.
+- **CrowdSec .deb hash pin (optional).** Set `CS_NGINX_BOUNCER_VERSION` + `CS_NGINX_BOUNCER_SHA256` and the build aborts if the downloaded `.deb` doesn't match byte-for-byte. Defends against the worst-case scenario where CrowdSec's GPG signing key itself is compromised — the attacker can sign anything, but the hash won't match the pinned value. The build always logs the computed hash so you can capture it for next time.
 - **CVE gate.** Every build runs `trivy` against the image. Any unpatched HIGH or CRITICAL CVE blocks the push to `:latest`.
 - **SBOM.** An SPDX SBOM is generated with `syft` for every build, attached as a workflow artifact and as a signed attestation on the published image.
 - **Cosign keyless signing.** Every published image is signed via GHA's OIDC token using Sigstore. No keys to manage.
 - **Build provenance + SBOM attestations** (`provenance: true`, `sbom: true` on the buildx push) — verifiable build trace.
+
+### Layered defense against a compromised CrowdSec repo
+
+| Failure mode | What stops it |
+|---|---|
+| Tampered `.deb` served by packagecloud | Hash in signed `Packages` file doesn't match → apt aborts |
+| Tampered `Packages` file | Hash in signed `Release` doesn't match → apt aborts |
+| Tampered `Release` file / wrong key on packagecloud | Pinned `CROWDSEC_GPG_KEY_ID` fingerprint check fails → build aborts |
+| `install.crowdsec.net` script altered | Not used at all — we install via apt with the pinned key |
+| **CrowdSec's GPG signing key compromised** | Hash pin (`CS_NGINX_BOUNCER_SHA256`) — opt-in but logged on every build for easy adoption |
 
 ### Verifying an image you pulled
 

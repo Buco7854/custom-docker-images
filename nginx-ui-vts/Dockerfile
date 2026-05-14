@@ -149,6 +149,24 @@ RUN set -eux; \
 ARG CROWDSEC_GPG_KEY_ID=9EB2753BF09DFB77
 ARG CROWDSEC_DEBIAN_RELEASE=trixie
 
+# When BOTH are set: pin to this exact .deb. The build aborts if either the
+# version pulled from apt isn't `CS_NGINX_BOUNCER_VERSION` or its sha256
+# doesn't match. This defends against a compromised CrowdSec signing key
+# (which would otherwise sign a malicious .deb that passes apt's checks).
+#
+# When EITHER is empty: get whatever apt offers as latest, log the hash so
+# you can capture it for next time. Apt's GPG chain still verifies, just no
+# protection against key compromise.
+#
+# Update workflow:
+#   1. CrowdSec releases a new version.
+#   2. Bump CS_NGINX_BOUNCER_VERSION here, run the build.
+#   3. Build logs the new sha256.
+#   4. Verify the version is legit (release notes, community sanity check).
+#   5. Paste the sha256 into CS_NGINX_BOUNCER_SHA256, re-build.
+# Or set both ARGs via build-args / workflow inputs.
+ARG CS_NGINX_BOUNCER_SHA256=
+
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates gnupg dirmngr; \
@@ -179,7 +197,35 @@ RUN set -eux; \
         apt-get download crowdsec-nginx-bouncer; \
     fi; \
     deb="$(ls crowdsec-nginx-bouncer_*.deb)"; \
-    echo "downloaded: $deb"; \
+    # Compute and ALWAYS log the .deb's sha256. If CS_NGINX_BOUNCER_SHA256
+    # is set, also abort the build on mismatch. This is the final defense
+    # against the scenario "CrowdSec's GPG signing key itself is compromised
+    # and used to sign a malicious .deb under an existing version number".
+    # Apt's GPG chain protects everything up to that point; the hash pin
+    # protects against a compromised key.
+    actual_sha="$(sha256sum "$deb" | awk '{print $1}')"; \
+    echo "==============================================================="; \
+    echo "  cs-nginx-bouncer .deb: $deb"; \
+    echo "  sha256:               $actual_sha"; \
+    echo "==============================================================="; \
+    if [ -n "${CS_NGINX_BOUNCER_SHA256}" ]; then \
+        if [ "$actual_sha" != "${CS_NGINX_BOUNCER_SHA256}" ]; then \
+            echo "ERROR: sha256 mismatch for $deb" >&2; \
+            echo "  expected: ${CS_NGINX_BOUNCER_SHA256}" >&2; \
+            echo "  got:      $actual_sha" >&2; \
+            echo "" >&2; \
+            echo "Either CrowdSec released a new build of this version (review" >&2; \
+            echo "their release notes and bump CS_NGINX_BOUNCER_SHA256), or" >&2; \
+            echo "their signing key has been compromised (do NOT bump until you" >&2; \
+            echo "have confirmation it's safe)." >&2; \
+            exit 1; \
+        fi; \
+        echo "sha256 pin verified."; \
+    else \
+        echo "NOTE: CS_NGINX_BOUNCER_SHA256 not set — relying on apt's GPG"; \
+        echo "      chain only. Set this build-arg to the sha256 printed"; \
+        echo "      above to also defend against CrowdSec signing-key compromise."; \
+    fi; \
     mkdir -p /build/bouncer-extracted; \
     dpkg-deb -x "$deb" /build/bouncer-extracted
 

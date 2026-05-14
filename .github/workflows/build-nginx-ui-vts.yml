@@ -17,6 +17,10 @@ on:
         description: 'Override cs-nginx-bouncer version (e.g. 1.1.6). Empty = latest.'
         required: false
         default: ''
+      cs_nginx_bouncer_sha256:
+        description: 'Optional sha256 pin of the cs-nginx-bouncer .deb. Empty = trust apt GPG chain only.'
+        required: false
+        default: ''
 
 jobs:
   build-and-test:
@@ -52,6 +56,7 @@ jobs:
           build-args: |
             NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
+            CS_NGINX_BOUNCER_SHA256=${{ github.event.inputs.cs_nginx_bouncer_sha256 }}
           tags: nginx-ui-vts:smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -184,6 +189,7 @@ jobs:
           build-args: |
             NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
+            CS_NGINX_BOUNCER_SHA256=${{ github.event.inputs.cs_nginx_bouncer_sha256 }}
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
