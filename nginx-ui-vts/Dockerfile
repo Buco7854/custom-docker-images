@@ -71,8 +71,9 @@ ARG VTS_VERSION=
 ARG CS_NGINX_BOUNCER_VERSION=
 
 # Resolves "latest" tag for a repo (owner/repo), prints it on stdout. Aborts
-# the build on failure rather than silently falling back, so we never produce
-# an image with mystery versions.
+# the build on failure rather than silently falling back. Uses GH_TOKEN if
+# present to dodge the unauthenticated GitHub API rate limit (60/hr per
+# shared runner IP -> easy to hit). With a token: 5000/hr.
 RUN set -eux; \
     cat > /usr/local/bin/gh-latest-tag <<'SH'
 #!/bin/sh
@@ -81,7 +82,12 @@ repo="$1"
 override="${2:-}"
 if [ -n "$override" ]; then echo "$override"; exit 0; fi
 url="https://api.github.com/repos/${repo}/releases/latest"
-tag="$(curl -fsSL "$url" | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*"\([^"]\+\)"$/\1/')"
+if [ -n "${GH_TOKEN:-}" ]; then
+    resp="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$url")"
+else
+    resp="$(curl -fsSL "$url")"
+fi
+tag="$(printf '%s' "$resp" | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*"\([^"]\+\)"$/\1/')"
 if [ -z "$tag" ]; then
     echo "ERROR: could not resolve latest tag for $repo from $url" >&2
     exit 1
@@ -90,10 +96,18 @@ echo "$tag"
 SH
 RUN chmod +x /usr/local/bin/gh-latest-tag
 
-RUN set -eux; \
+# The GitHub token is mounted as a build secret only for this single RUN.
+# It's optional — without it, gh-latest-tag falls back to unauthenticated
+# requests (and may hit the 60/hr rate limit on a shared runner IP).
+RUN --mount=type=secret,id=github_token \
+    set -eux; \
+    if [ -s /run/secrets/github_token ]; then \
+        export GH_TOKEN="$(cat /run/secrets/github_token)"; \
+    fi; \
     NDK_VERSION="$(gh-latest-tag vision5/ngx_devel_kit            "${NDK_VERSION}")"; \
     LUA_NGINX_VERSION="$(gh-latest-tag openresty/lua-nginx-module "${LUA_NGINX_VERSION}")"; \
     VTS_VERSION="$(gh-latest-tag vozlt/nginx-module-vts           "${VTS_VERSION}")"; \
+    unset GH_TOKEN; \
     echo "Using: ndk=$NDK_VERSION lua=$LUA_NGINX_VERSION vts=$VTS_VERSION"; \
     git clone --depth=1 --branch "$VTS_VERSION"        https://github.com/vozlt/nginx-module-vts.git; \
     git clone --depth=1 --branch "$NDK_VERSION"        https://github.com/vision5/ngx_devel_kit.git; \
