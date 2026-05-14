@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 3 * * *' # Daily — picks up new uozi/nginx-ui + cs-nginx-bouncer releases
   push:
+    branches: [main]
+    paths:
+      - 'nginx-ui-vts/**'
+      - '.github/workflows/build-nginx-ui-vts.yml'
+  pull_request:
+    branches: [main]
     paths:
       - 'nginx-ui-vts/**'
       - '.github/workflows/build-nginx-ui-vts.yml'
@@ -163,13 +169,17 @@ jobs:
           artifact-name: sbom-spdx.json
 
       # -------------------------------------------------------------------
-      # Stage 5: multi-arch build + push (we only get here if every gate
-      # above passed). Tagging both :latest and :sha-<short> for traceability.
+      # Stage 5: multi-arch build + push. PR builds stop here — they ran
+      # smoke + Trivy + SBOM but they don't publish to GHCR (would be wrong
+      # to ship :latest from an un-merged PR). Push only happens on merges
+      # to main, on the daily schedule, and on manual dispatch.
       # -------------------------------------------------------------------
       - name: Set up QEMU (for arm64 build)
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -177,6 +187,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push multi-arch
+        if: github.event_name != 'pull_request'
         id: push
         uses: docker/build-push-action@v5
         with:
@@ -209,15 +220,18 @@ jobs:
       #       --certificate-oidc-issuer https://token.actions.githubusercontent.com
       # -------------------------------------------------------------------
       - name: Install cosign
+        if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@v3
 
       - name: Sign the published image (keyless)
+        if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Attach SBOM to the image (signed)
+        if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
