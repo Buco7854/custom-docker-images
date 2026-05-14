@@ -43,7 +43,10 @@ RUN set -eux; \
 ############################################################
 # Stage 2: compile dynamic modules (VTS + NDK + lua-nginx-module)
 ############################################################
-FROM debian:bookworm-slim AS builder
+# Match the runtime base (uozi/nginx-ui is built on debian trixie). Compiling
+# against the same release means our dynamic modules link against the SAME
+# luajit / pcre2 / ssl / zlib versions that will be present at runtime.
+FROM debian:trixie-slim AS builder
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
