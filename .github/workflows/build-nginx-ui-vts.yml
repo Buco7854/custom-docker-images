@@ -59,10 +59,13 @@ jobs:
           pull: true
           load: true
           platforms: linux/amd64
+          # Only emit each build-arg if the workflow_dispatch input is set —
+          # otherwise an empty value overrides the Dockerfile's ARG default
+          # and `FROM ${NGINX_UI_REF}` ends up blank.
           build-args: |
-            NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
-            CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
-            CS_NGINX_BOUNCER_SHA256=${{ github.event.inputs.cs_nginx_bouncer_sha256 }}
+            ${{ github.event.inputs.nginx_ui_ref && format('NGINX_UI_REF={0}', github.event.inputs.nginx_ui_ref) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_sha256 && format('CS_NGINX_BOUNCER_SHA256={0}', github.event.inputs.cs_nginx_bouncer_sha256) || '' }}
           tags: nginx-ui-vts:smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -204,9 +207,9 @@ jobs:
           provenance: true
           sbom: true
           build-args: |
-            NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
-            CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
-            CS_NGINX_BOUNCER_SHA256=${{ github.event.inputs.cs_nginx_bouncer_sha256 }}
+            ${{ github.event.inputs.nginx_ui_ref && format('NGINX_UI_REF={0}', github.event.inputs.nginx_ui_ref) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_sha256 && format('CS_NGINX_BOUNCER_SHA256={0}', github.event.inputs.cs_nginx_bouncer_sha256) || '' }}
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
