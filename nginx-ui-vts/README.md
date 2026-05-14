@@ -87,42 +87,21 @@ The entrypoint manages that shim:
 
 The example `nginx.conf` in [`../examples/nginx/`](../examples/nginx/nginx.conf) already has the include + the required `lua_*` directives at the http level.
 
-## Supply-chain hardening
+## Build-time sanity checks
 
-What's in place:
+A handful of lightweight checks run during the build so obvious problems
+fail fast rather than producing a broken image:
 
-- **Base image pinned by SHA256 digest**, not tag. Dependabot opens PRs when upstream `uozi/nginx-ui` changes; each bump is gated by smoke + CVE scan + cosign signing before publish.
-- **No `curl | bash` at build time.** The CrowdSec apt key is fetched over HTTPS and its **GPG fingerprint is verified** against a value pinned in the Dockerfile (`CROWDSEC_GPG_FINGERPRINT`) — build fails if it doesn't match.
-- **CrowdSec .deb hash pin (optional).** Set `CS_NGINX_BOUNCER_VERSION` + `CS_NGINX_BOUNCER_SHA256` and the build aborts if the downloaded `.deb` doesn't match byte-for-byte. Defends against the worst-case scenario where CrowdSec's GPG signing key itself is compromised — the attacker can sign anything, but the hash won't match the pinned value. The build always logs the computed hash so you can capture it for next time.
-- **CVE gate.** Every build runs `trivy` against the image. Any unpatched HIGH or CRITICAL CVE blocks the push to `:latest`. Time-limited exceptions for CVEs in upstream binaries we can't fix live in [`.trivyignore.yaml`](../.trivyignore.yaml); each entry expires and re-enters the gate automatically.
-- **SBOM.** An SPDX SBOM is generated with `syft` for every build, attached as a workflow artifact and as a signed attestation on the published image.
-- **Cosign keyless signing.** Every published image is signed via GHA's OIDC token using Sigstore. No keys to manage.
-- **Build provenance + SBOM attestations** (`provenance: true`, `sbom: true` on the buildx push) — verifiable build trace.
-
-### Layered defense against a compromised CrowdSec repo
-
-| Failure mode | What stops it |
-|---|---|
-| Tampered `.deb` served by packagecloud | Hash in signed `Packages` file doesn't match → apt aborts |
-| Tampered `Packages` file | Hash in signed `Release` doesn't match → apt aborts |
-| Tampered `Release` file / wrong key on packagecloud | Pinned `CROWDSEC_GPG_FINGERPRINT` fingerprint check fails → build aborts |
-| `install.crowdsec.net` script altered | Not used at all — we install via apt with the pinned key |
-| **CrowdSec's GPG signing key compromised** | Hash pin (`CS_NGINX_BOUNCER_SHA256`) — opt-in but logged on every build for easy adoption |
-
-### Verifying an image you pulled
-
-```bash
-# Image came from this repo's CI:
-cosign verify ghcr.io/<owner>/nginx-ui-vts:latest \
-  --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-
-# Inspect the signed SBOM:
-cosign verify-attestation --type spdxjson ghcr.io/<owner>/nginx-ui-vts:latest \
-  --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  | jq -r '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json
-```
+- **GPG fingerprint verification** on the CrowdSec apt key (pinned in the
+  Dockerfile as `CROWDSEC_GPG_FINGERPRINT`) — build aborts if it doesn't match.
+- **Asset discovery** in the extracted `.debs` — build aborts if expected
+  files (lua module, bouncer config, templates) aren't where we expect.
+- **`nginx -t`** in a final RUN — config syntax error stops the build.
+- **CI smoke test** — image is run, modules verified loaded, `/health` hit,
+  reload API exercised. Multi-arch push only happens if smoke passes.
+- **Informational Trivy CVE scan** in CI — outputs a table of HIGH/CRITICAL
+  CVEs to the workflow log. Does **not** fail the build. Glance at it
+  occasionally to know what's in your image.
 
 ## Reload API
 

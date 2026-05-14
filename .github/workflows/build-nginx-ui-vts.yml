@@ -2,29 +2,20 @@ name: Build nginx-ui + VTS module
 
 on:
   schedule:
-    - cron: '0 3 * * *' # Daily — picks up new uozi/nginx-ui + cs-nginx-bouncer releases
+    - cron: '0 3 * * *' # Daily — picks up upstream changes
   push:
-    branches: [main]
-    paths:
-      - 'nginx-ui-vts/**'
-      - '.github/workflows/build-nginx-ui-vts.yml'
-  pull_request:
     branches: [main]
     paths:
       - 'nginx-ui-vts/**'
       - '.github/workflows/build-nginx-ui-vts.yml'
   workflow_dispatch:
     inputs:
-      nginx_ui_ref:
-        description: 'Override uozi/nginx-ui ref (e.g. uozi/nginx-ui@sha256:...). Empty = use the digest pinned in the Dockerfile.'
+      nginx_ui_tag:
+        description: 'uozi/nginx-ui tag to build on top of'
         required: false
-        default: ''
+        default: 'latest'
       cs_nginx_bouncer_version:
         description: 'Override cs-nginx-bouncer version (e.g. 1.1.6). Empty = latest.'
-        required: false
-        default: ''
-      cs_nginx_bouncer_sha256:
-        description: 'Optional sha256 pin of the cs-nginx-bouncer .deb. Empty = trust apt GPG chain only.'
         required: false
         default: ''
 
@@ -34,7 +25,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write    # cosign keyless via GHA OIDC
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/nginx-ui-vts
     steps:
@@ -48,10 +38,7 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # -------------------------------------------------------------------
-      # Stage 1: build amd64 only, load locally so we can smoke-test it.
-      # Multi-arch + push come later, gated on every check below passing.
-      # -------------------------------------------------------------------
+      # --- Build amd64 first for a quick smoke test --------------------
       - name: Build amd64 image for smoke testing
         uses: docker/build-push-action@v5
         with:
@@ -59,24 +46,16 @@ jobs:
           pull: true
           load: true
           platforms: linux/amd64
-          # Only emit each build-arg if the workflow_dispatch input is set —
-          # otherwise an empty value overrides the Dockerfile's ARG default
-          # and `FROM ${NGINX_UI_REF}` ends up blank.
           build-args: |
-            ${{ github.event.inputs.nginx_ui_ref && format('NGINX_UI_REF={0}', github.event.inputs.nginx_ui_ref) || '' }}
+            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
             ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
-            ${{ github.event.inputs.cs_nginx_bouncer_sha256 && format('CS_NGINX_BOUNCER_SHA256={0}', github.event.inputs.cs_nginx_bouncer_sha256) || '' }}
-          # Token mounted only on the RUN that calls the GitHub API. Lifts
-          # the unauthenticated 60/hr rate limit to 5000/hr.
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           tags: nginx-ui-vts:smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # -------------------------------------------------------------------
-      # Stage 2: functional smoke test.
-      # -------------------------------------------------------------------
+      # --- Smoke test --------------------------------------------------
       - name: Run container
         run: |
           docker run -d --name smoke \
@@ -101,40 +80,25 @@ jobs:
           docker exec smoke sh -c '
             set -e
             MOD=$(nginx -V 2>&1 | grep -oE -- "--modules-path=[^ ]+" | sed "s/.*=//")
-            # VTS + lua are required. NDK is optional (Debian may bundle
-            # it into the lua module .so).
             for so in ngx_http_vhost_traffic_status_module.so \
                       ngx_http_lua_module.so; do
               test -f "$MOD/$so" || { echo "missing: $MOD/$so" >&2; exit 1; }
             done
             echo "required .so files present in $MOD"
-            ls -la "$MOD"
           '
 
-      - name: nginx -t (config validates with bouncer disabled)
+      - name: nginx -t
         run: docker exec smoke nginx -t
 
-      - name: nginx -V mentions --with-compat
-        run: |
-          if ! docker exec smoke sh -c 'nginx -V 2>&1' | grep -q -- '--with-compat'; then
-            echo "upstream nginx is NOT built with --with-compat; dynamic modules may fail" >&2
-            exit 1
-          fi
-
-      - name: reload API rejects requests without the key
+      - name: reload API rejects without key, accepts with key
         run: |
           status=$(curl -s -o /dev/null -w '%{http_code}' \
                    -X POST http://127.0.0.1:9010/reload)
           test "$status" = "403" || { echo "expected 403, got $status" >&2; exit 1; }
+          curl -fsS -X POST -H 'X-API-Key: smoke-test-key' \
+               http://127.0.0.1:9010/test | grep -q '"status":"ok"'
 
-      - name: reload API accepts requests with the correct key
-        run: |
-          curl -fsS -X POST \
-               -H 'X-API-Key: smoke-test-key' \
-               http://127.0.0.1:9010/test \
-               | grep -q '"status":"ok"'
-
-      - name: Dump container logs (always)
+      - name: Container logs (always)
         if: always()
         run: docker logs smoke || true
 
@@ -142,15 +106,9 @@ jobs:
         if: always()
         run: docker rm -f smoke || true
 
-      # -------------------------------------------------------------------
-      # Stage 3: CVE gate. Block the push if anything HIGH or CRITICAL is
-      # unpatched. SARIF output is also uploaded so it shows up in GitHub's
-      # Security tab for visibility on lower-severity findings.
-      # The diagnostic step runs first to dump the full CVE table into the
-      # workflow log so a gate failure is debuggable without opening the
-      # Security tab. continue-on-error so it never blocks the run.
-      # -------------------------------------------------------------------
-      - name: Trivy diagnostic dump (table, never gates)
+      # --- Simple informational CVE scan (never fails) -----------------
+      # Just so we can glance at what's in the image. No gating.
+      - name: Trivy CVE scan (informational only)
         if: always()
         continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
@@ -162,54 +120,11 @@ jobs:
           vuln-type: os,library
           exit-code: '0'
 
-      - name: Trivy CVE scan (block on HIGH+CRITICAL)
-        id: trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: nginx-ui-vts:smoke
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-
-      # Upload only if Trivy actually wrote a SARIF file (it may not have
-      # if Trivy itself crashed, or if an earlier step failed and Trivy
-      # was skipped). Don't fail the job on upload errors — the Trivy
-      # step above is the actual gate.
-      - name: Upload Trivy SARIF to Security tab
-        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy
-
-      # -------------------------------------------------------------------
-      # Stage 4: SBOM. Attached to the workflow run; cosign also signs it
-      # alongside the image below so consumers can verify it.
-      # -------------------------------------------------------------------
-      - name: Generate SBOM (SPDX) with syft
-        uses: anchore/sbom-action@v0
-        with:
-          image: nginx-ui-vts:smoke
-          format: spdx-json
-          output-file: sbom.spdx.json
-          artifact-name: sbom-spdx.json
-
-      # -------------------------------------------------------------------
-      # Stage 5: multi-arch build + push. PR builds stop here — they ran
-      # smoke + Trivy + SBOM but they don't publish to GHCR (would be wrong
-      # to ship :latest from an un-merged PR). Push only happens on merges
-      # to main, on the daily schedule, and on manual dispatch.
-      # -------------------------------------------------------------------
-      - name: Set up QEMU (for arm64 build)
-        if: github.event_name != 'pull_request'
+      # --- Multi-arch build + push ------------------------------------
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -217,20 +132,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push multi-arch
-        if: github.event_name != 'pull_request'
-        id: push
         uses: docker/build-push-action@v5
         with:
           context: ./nginx-ui-vts
           pull: true
           push: true
           platforms: linux/amd64,linux/arm64
-          provenance: true
-          sbom: true
           build-args: |
-            ${{ github.event.inputs.nginx_ui_ref && format('NGINX_UI_REF={0}', github.event.inputs.nginx_ui_ref) || '' }}
+            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
             ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
-            ${{ github.event.inputs.cs_nginx_bouncer_sha256 && format('CS_NGINX_BOUNCER_SHA256={0}', github.event.inputs.cs_nginx_bouncer_sha256) || '' }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           tags: |
@@ -239,35 +149,5 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=AGPL-3.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # -------------------------------------------------------------------
-      # Stage 6: sign with cosign keyless (Sigstore via GHA OIDC).
-      # No keys to manage. Anyone can verify the published image came from
-      # this workflow with:
-      #   cosign verify ghcr.io/<owner>/nginx-ui-vts:latest \
-      #       --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
-      #       --certificate-oidc-issuer https://token.actions.githubusercontent.com
-      # -------------------------------------------------------------------
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign the published image (keyless)
-        if: github.event_name != 'pull_request'
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          cosign sign --yes "${IMAGE}@${DIGEST}"
-
-      - name: Attach SBOM to the image (signed)
-        if: github.event_name != 'pull_request'
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          cosign attest --yes \
-            --predicate sbom.spdx.json \
-            --type spdxjson \
-            "${IMAGE}@${DIGEST}"

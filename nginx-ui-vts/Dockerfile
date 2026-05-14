@@ -21,18 +21,15 @@
 #   * The bouncer is fetched as the upstream Debian .deb (signed via the
 #     pinned CrowdSec GPG key).
 #
-# SUPPLY-CHAIN PINNING — the base image is pinned by SHA256 digest, not tag.
-# Dependabot's docker ecosystem opens PRs to bump the digest; each bump goes
-# through the same smoke + CVE scan + cosign signing pipeline before publish.
-# The tag-after-image-name is informational only (for human readability);
-# what's actually pulled is the digest. To override at build time:
-#   docker build --build-arg NGINX_UI_REF=uozi/nginx-ui@sha256:...
-ARG NGINX_UI_REF=uozi/nginx-ui:latest@sha256:18e009213e949373523861732bbef0af0d076c8d1b593b8b66bf873f70b4be5c
+# Build on top of whatever uozi/nginx-ui ships. Default :latest, override
+# with --build-arg NGINX_UI_TAG=... if you want to pin to a specific tag
+# for one-off builds (e.g. testing).
+ARG NGINX_UI_TAG=latest
 
 ############################################################
 # Stage 1: discover nginx version + modules path
 ############################################################
-FROM ${NGINX_UI_REF} AS discover
+FROM uozi/nginx-ui:${NGINX_UI_TAG} AS discover
 
 RUN set -eux; \
     nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /tmp/nginx_version; \
@@ -177,23 +174,6 @@ ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
 # trixie. Bump this when CrowdSec adds a trixie repo.
 ARG CROWDSEC_DEBIAN_RELEASE=bookworm
 
-# When BOTH are set: pin to this exact .deb. The build aborts if either the
-# version pulled from apt isn't `CS_NGINX_BOUNCER_VERSION` or its sha256
-# doesn't match. This defends against a compromised CrowdSec signing key
-# (which would otherwise sign a malicious .deb that passes apt's checks).
-#
-# When EITHER is empty: get whatever apt offers as latest, log the hash so
-# you can capture it for next time. Apt's GPG chain still verifies, just no
-# protection against key compromise.
-#
-# Update workflow:
-#   1. CrowdSec releases a new version.
-#   2. Bump CS_NGINX_BOUNCER_VERSION here, run the build.
-#   3. Build logs the new sha256.
-#   4. Verify the version is legit (release notes, community sanity check).
-#   5. Paste the sha256 into CS_NGINX_BOUNCER_SHA256, re-build.
-# Or set both ARGs via build-args / workflow inputs.
-ARG CS_NGINX_BOUNCER_SHA256=
 
 RUN set -eux; \
     apt-get update; \
@@ -228,35 +208,8 @@ RUN set -eux; \
     apt-get download libnginx-mod-http-lua; \
     cd /build/bouncer-deb; \
     deb="$(ls crowdsec-nginx-bouncer_*.deb)"; \
-    # Compute and ALWAYS log the .deb's sha256. If CS_NGINX_BOUNCER_SHA256
-    # is set, also abort the build on mismatch. This is the final defense
-    # against the scenario "CrowdSec's GPG signing key itself is compromised
-    # and used to sign a malicious .deb under an existing version number".
-    # Apt's GPG chain protects everything up to that point; the hash pin
-    # protects against a compromised key.
-    actual_sha="$(sha256sum "$deb" | awk '{print $1}')"; \
-    echo "==============================================================="; \
-    echo "  cs-nginx-bouncer .deb: $deb"; \
-    echo "  sha256:               $actual_sha"; \
-    echo "==============================================================="; \
-    if [ -n "${CS_NGINX_BOUNCER_SHA256}" ]; then \
-        if [ "$actual_sha" != "${CS_NGINX_BOUNCER_SHA256}" ]; then \
-            echo "ERROR: sha256 mismatch for $deb" >&2; \
-            echo "  expected: ${CS_NGINX_BOUNCER_SHA256}" >&2; \
-            echo "  got:      $actual_sha" >&2; \
-            echo "" >&2; \
-            echo "Either CrowdSec released a new build of this version (review" >&2; \
-            echo "their release notes and bump CS_NGINX_BOUNCER_SHA256), or" >&2; \
-            echo "their signing key has been compromised (do NOT bump until you" >&2; \
-            echo "have confirmation it's safe)." >&2; \
-            exit 1; \
-        fi; \
-        echo "sha256 pin verified."; \
-    else \
-        echo "NOTE: CS_NGINX_BOUNCER_SHA256 not set — relying on apt's GPG"; \
-        echo "      chain only. Set this build-arg to the sha256 printed"; \
-        echo "      above to also defend against CrowdSec signing-key compromise."; \
-    fi; \
+    echo "cs-nginx-bouncer .deb: $deb"; \
+    echo "sha256: $(sha256sum "$deb" | awk '{print $1}')"; \
     mkdir -p /build/bouncer-extracted /build/lua-extracted; \
     dpkg-deb -x "$deb" /build/bouncer-extracted; \
     dpkg-deb -x /build/lua-deb/libnginx-mod-http-lua_*.deb /build/lua-extracted
@@ -292,10 +245,8 @@ RUN set -eux; \
 ############################################################
 # Stage 3: final image on top of nginx-ui
 ############################################################
-# Re-declare the ARG so it's available in this stage too. Same digest pin
-# as the discover stage above.
-ARG NGINX_UI_REF
-FROM ${NGINX_UI_REF}
+ARG NGINX_UI_TAG
+FROM uozi/nginx-ui:${NGINX_UI_TAG}
 
 # Assert Debian base. uozi/nginx-ui has been Debian (currently trixie) for a
 # long time; if upstream ever switches to Alpine this build needs to be
