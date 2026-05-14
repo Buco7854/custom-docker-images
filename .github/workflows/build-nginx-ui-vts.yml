@@ -146,7 +146,22 @@ jobs:
       # Stage 3: CVE gate. Block the push if anything HIGH or CRITICAL is
       # unpatched. SARIF output is also uploaded so it shows up in GitHub's
       # Security tab for visibility on lower-severity findings.
+      # The diagnostic step runs first to dump the full CVE table into the
+      # workflow log so a gate failure is debuggable without opening the
+      # Security tab. continue-on-error so it never blocks the run.
       # -------------------------------------------------------------------
+      - name: Trivy diagnostic dump (table, never gates)
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: nginx-ui-vts:smoke
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '0'
+
       - name: Trivy CVE scan (block on HIGH+CRITICAL)
         id: trivy
         uses: aquasecurity/trivy-action@v0.36.0
