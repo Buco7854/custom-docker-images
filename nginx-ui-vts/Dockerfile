@@ -1,17 +1,25 @@
 # syntax=docker/dockerfile:1.7
 #
 # nginx-ui + dynamic modules:
-#   - nginx-module-vts (with custom HTML dashboard baked in)
-#   - ngx_devel_kit + lua-nginx-module (required by the CrowdSec lua bouncer)
+#   - nginx-module-vts          (compiled from source — no Debian package)
+#   - ngx_http_lua_module       (Debian's libnginx-mod-http-lua, with NDK
+#                                bundled in by Debian's packaging)
 # Plus:
 #   - cs-nginx-bouncer (CrowdSec lua bouncer) installed at canonical paths
 #   - reload API (POST /reload with X-API-Key)
 #   - supercronic reading $CRONTAB_FILE
 #
-# Strategy: discover the exact nginx version shipped by uozi/nginx-ui, fetch
-# the matching nginx source, compile all dynamic modules against it with
-# --with-compat, then copy the .so files + bouncer assets into the final
-# image. Runtime LuaJIT + lua-resty-* deps are installed in the final stage.
+# Strategy:
+#   * VTS has no Debian package, so we compile it from source against the
+#     exact nginx version that uozi/nginx-ui ships, with --with-compat.
+#   * lua-nginx-module IS packaged by Debian (`libnginx-mod-http-lua`); both
+#     it and uozi's nginx are built with --with-compat, so the Debian-built
+#     .so loads cleanly into uozi's nginx without us having to compile it.
+#     Massive simplification — no luajit-dev, no NDK git clone, no version
+#     resolution dance for that piece. Debian's security team patches CVEs;
+#     daily rebuild picks them up.
+#   * The bouncer is fetched as the upstream Debian .deb (signed via the
+#     pinned CrowdSec GPG key).
 #
 # SUPPLY-CHAIN PINNING — the base image is pinned by SHA256 digest, not tag.
 # Dependabot's docker ecosystem opens PRs to bump the digest; each bump goes
@@ -52,7 +60,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates build-essential git curl make \
         libpcre2-dev libssl-dev zlib1g-dev \
-        libluajit-5.1-dev luajit \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -66,10 +73,8 @@ RUN set -eux; \
     mv "nginx-${NGINX_VERSION}" nginx-src; \
     rm nginx.tar.gz
 
-# Resolve module versions at build time. Empty ARG => fetch the latest release
+# Resolve VTS version at build time. Empty ARG => fetch the latest release
 # tag from GitHub. Pass a specific version as a --build-arg to override.
-ARG NDK_VERSION=
-ARG LUA_NGINX_VERSION=
 ARG VTS_VERSION=
 ARG CS_NGINX_BOUNCER_VERSION=
 
@@ -123,14 +128,10 @@ RUN --mount=type=secret,id=github_token \
     if [ -s /run/secrets/github_token ]; then \
         export GH_TOKEN="$(cat /run/secrets/github_token)"; \
     fi; \
-    NDK_VERSION="$(gh-latest-tag vision5/ngx_devel_kit            "${NDK_VERSION}")"; \
-    LUA_NGINX_VERSION="$(gh-latest-tag openresty/lua-nginx-module "${LUA_NGINX_VERSION}")"; \
-    VTS_VERSION="$(gh-latest-tag vozlt/nginx-module-vts           "${VTS_VERSION}")"; \
+    VTS_VERSION="$(gh-latest-tag vozlt/nginx-module-vts "${VTS_VERSION}")"; \
     unset GH_TOKEN; \
-    echo "Using: ndk=$NDK_VERSION lua=$LUA_NGINX_VERSION vts=$VTS_VERSION"; \
-    git clone --depth=1 --branch "$VTS_VERSION"        https://github.com/vozlt/nginx-module-vts.git; \
-    git clone --depth=1 --branch "$NDK_VERSION"        https://github.com/vision5/ngx_devel_kit.git; \
-    git clone --depth=1 --branch "$LUA_NGINX_VERSION"  https://github.com/openresty/lua-nginx-module.git
+    echo "Using: vts=$VTS_VERSION"; \
+    git clone --depth=1 --branch "$VTS_VERSION" https://github.com/vozlt/nginx-module-vts.git
 
 # Bake custom HTML dashboard into the VTS module
 COPY status.html /tmp/status.html
@@ -140,23 +141,12 @@ RUN set -eux; \
     ./tplToDefine.sh /tmp/status.html \
         > ../src/ngx_http_vhost_traffic_status_module_html.h
 
-# Configure + build the three dynamic modules. lua-nginx-module needs
-# LUAJIT_LIB and LUAJIT_INC pointing at the LuaJIT install.
+# Configure + build VTS as a dynamic module. Just VTS — lua-nginx-module
+# is pulled in below from Debian as a pre-built .so.
 RUN set -eux; \
-    arch="$(uname -m)"; \
-    case "$arch" in \
-        x86_64)  lj_lib=/usr/lib/x86_64-linux-gnu ;; \
-        aarch64) lj_lib=/usr/lib/aarch64-linux-gnu ;; \
-        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
-    esac; \
-    export LUAJIT_LIB="$lj_lib"; \
-    export LUAJIT_INC=/usr/include/luajit-2.1; \
     cd nginx-src; \
     ./configure --with-compat \
-        --with-ld-opt="-Wl,-rpath,$lj_lib" \
-        --add-dynamic-module=/build/nginx-module-vts \
-        --add-dynamic-module=/build/ngx_devel_kit \
-        --add-dynamic-module=/build/lua-nginx-module; \
+        --add-dynamic-module=/build/nginx-module-vts; \
     make modules -j"$(nproc)"; \
     ls -la objs/
 
@@ -222,13 +212,18 @@ RUN set -eux; \
     echo "deb [signed-by=/usr/share/keyrings/crowdsec.gpg] https://packagecloud.io/crowdsec/crowdsec/debian/ ${CROWDSEC_DEBIAN_RELEASE} main" \
         > /etc/apt/sources.list.d/crowdsec.list; \
     apt-get update; \
-    mkdir -p /build/bouncer-deb; \
+    mkdir -p /build/bouncer-deb /build/lua-deb; \
     cd /build/bouncer-deb; \
     if [ -n "${CS_NGINX_BOUNCER_VERSION}" ]; then \
         apt-get download "crowdsec-nginx-bouncer=${CS_NGINX_BOUNCER_VERSION}*"; \
     else \
         apt-get download crowdsec-nginx-bouncer; \
     fi; \
+    # libnginx-mod-http-lua comes from Debian main (not packagecloud) and
+    # also bundles whatever NDK pieces lua-nginx-module needs to run.
+    cd /build/lua-deb; \
+    apt-get download libnginx-mod-http-lua; \
+    cd /build/bouncer-deb; \
     deb="$(ls crowdsec-nginx-bouncer_*.deb)"; \
     # Compute and ALWAYS log the .deb's sha256. If CS_NGINX_BOUNCER_SHA256
     # is set, also abort the build on mismatch. This is the final defense
@@ -259,14 +254,17 @@ RUN set -eux; \
         echo "      chain only. Set this build-arg to the sha256 printed"; \
         echo "      above to also defend against CrowdSec signing-key compromise."; \
     fi; \
-    mkdir -p /build/bouncer-extracted; \
-    dpkg-deb -x "$deb" /build/bouncer-extracted
+    mkdir -p /build/bouncer-extracted /build/lua-extracted; \
+    dpkg-deb -x "$deb" /build/bouncer-extracted; \
+    dpkg-deb -x /build/lua-deb/libnginx-mod-http-lua_*.deb /build/lua-extracted
 
-# Assert the .deb has the structure we expect. If upstream restructures the
-# package, fail loudly here rather than silently producing a broken image.
+# Assert both .debs have the structure we expect. If upstream restructures
+# either package, fail loudly here rather than silently producing a broken image.
 RUN set -eux; \
     echo "--- crowdsec-nginx-bouncer .deb contents ---"; \
     find /build/bouncer-extracted -maxdepth 4 -printf '%P\n' | sort; \
+    echo "--- libnginx-mod-http-lua .deb contents ---"; \
+    find /build/lua-extracted -maxdepth 4 -printf '%P\n' | sort; \
     echo "--------------------------------------------"; \
     fail=0; \
     for path in \
@@ -281,6 +279,13 @@ RUN set -eux; \
             fail=1; \
         fi; \
     done; \
+    # The Debian lua-module .deb must at minimum ship the lua .so. NDK may
+    # be bundled in the same .deb or compiled into the lua module — we
+    # accept either.
+    if ! ls /build/lua-extracted/usr/lib/nginx/modules/ngx_http_lua_module.so >/dev/null 2>&1; then \
+        echo "ASSERT FAIL: ngx_http_lua_module.so not present in libnginx-mod-http-lua" >&2; \
+        fail=1; \
+    fi; \
     if [ "$fail" -ne 0 ]; then \
         echo "" >&2; \
         echo "crowdsec-nginx-bouncer .deb layout changed. Update the COPY/install" >&2; \
@@ -337,28 +342,44 @@ RUN set -eux; \
     echo "${sc_sha}  /usr/local/bin/supercronic" | sha1sum -c -; \
     chmod +x /usr/local/bin/supercronic
 
-# Place all three dynamic modules and enable them.
-# NDK MUST be loaded before lua-nginx-module.
+# Place the dynamic modules and enable them.
+#   * VTS: compiled in this image.
+#   * lua-nginx-module (+ NDK if shipped as a separate .so): extracted from
+#     Debian's libnginx-mod-http-lua .deb. We iterate over whatever .so files
+#     the .deb actually ships, so it doesn't matter if NDK is a separate file
+#     or compiled into the lua module — both layouts work.
+# Load order:
+#   10 = NDK (if present), 15 = lua, 90 = VTS.
 COPY --from=discover /tmp/modules_path /tmp/modules_path
-COPY --from=builder /build/nginx-src/objs/ngx_http_vhost_traffic_status_module.so /tmp/mods/
-COPY --from=builder /build/nginx-src/objs/ndk_http_module.so                       /tmp/mods/
-COPY --from=builder /build/nginx-src/objs/ngx_http_lua_module.so                   /tmp/mods/
+COPY --from=builder  /build/nginx-src/objs/ngx_http_vhost_traffic_status_module.so /tmp/mods/
+COPY --from=builder  /build/lua-extracted/usr/lib/nginx/modules/                   /tmp/lua-mods/
 
 RUN set -eux; \
     MODULES_PATH="$(cat /tmp/modules_path)"; \
     mkdir -p "$MODULES_PATH" /etc/nginx/modules-available /etc/nginx/modules-enabled; \
-    for so in ngx_http_vhost_traffic_status_module.so ndk_http_module.so ngx_http_lua_module.so; do \
-        mv "/tmp/mods/$so" "$MODULES_PATH/$so"; \
-        chmod 644 "$MODULES_PATH/$so"; \
-    done; \
-    # NDK first (10), lua second (15), VTS later (90) — load order matters for ndk/lua.
-    printf 'load_module %s/ndk_http_module.so;\n'                          "$MODULES_PATH" > /etc/nginx/modules-available/10-mod-ndk.conf; \
-    printf 'load_module %s/ngx_http_lua_module.so;\n'                      "$MODULES_PATH" > /etc/nginx/modules-available/15-mod-lua.conf; \
-    printf 'load_module %s/ngx_http_vhost_traffic_status_module.so;\n'     "$MODULES_PATH" > /etc/nginx/modules-available/90-mod-vts.conf; \
-    for f in 10-mod-ndk 15-mod-lua 90-mod-vts; do \
-        ln -sf "/etc/nginx/modules-available/$f.conf" "/etc/nginx/modules-enabled/$f.conf"; \
-    done; \
-    rm -rf /tmp/mods /tmp/modules_path
+    # VTS — compiled here.
+    mv /tmp/mods/ngx_http_vhost_traffic_status_module.so "$MODULES_PATH/"; \
+    chmod 644 "$MODULES_PATH/ngx_http_vhost_traffic_status_module.so"; \
+    printf 'load_module %s/ngx_http_vhost_traffic_status_module.so;\n' "$MODULES_PATH" \
+        > /etc/nginx/modules-available/90-mod-vts.conf; \
+    ln -sf /etc/nginx/modules-available/90-mod-vts.conf /etc/nginx/modules-enabled/90-mod-vts.conf; \
+    # NDK — only if Debian shipped it as a separate .so.
+    if [ -f /tmp/lua-mods/ndk_http_module.so ]; then \
+        mv /tmp/lua-mods/ndk_http_module.so "$MODULES_PATH/"; \
+        chmod 644 "$MODULES_PATH/ndk_http_module.so"; \
+        printf 'load_module %s/ndk_http_module.so;\n' "$MODULES_PATH" \
+            > /etc/nginx/modules-available/10-mod-ndk.conf; \
+        ln -sf /etc/nginx/modules-available/10-mod-ndk.conf /etc/nginx/modules-enabled/10-mod-ndk.conf; \
+    else \
+        echo "NDK is bundled into lua module — no separate load_module needed"; \
+    fi; \
+    # lua-nginx-module (always present, we asserted above).
+    mv /tmp/lua-mods/ngx_http_lua_module.so "$MODULES_PATH/"; \
+    chmod 644 "$MODULES_PATH/ngx_http_lua_module.so"; \
+    printf 'load_module %s/ngx_http_lua_module.so;\n' "$MODULES_PATH" \
+        > /etc/nginx/modules-available/15-mod-lua.conf; \
+    ln -sf /etc/nginx/modules-available/15-mod-lua.conf /etc/nginx/modules-enabled/15-mod-lua.conf; \
+    rm -rf /tmp/mods /tmp/lua-mods /tmp/modules_path
 
 # Install the CrowdSec nginx bouncer assets at their canonical Debian-package
 # paths. The .deb installs the http-level snippet to /etc/nginx/conf.d/ — we
@@ -426,7 +447,9 @@ ENV RELOAD_API_PORT=9010 \
 # it only takes effect once a user nginx.conf includes the shim).
 RUN set -eux; \
     MODULES_PATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/^--modules-path=//' || echo /usr/lib/nginx/modules)"; \
-    for so in ngx_http_vhost_traffic_status_module.so ndk_http_module.so ngx_http_lua_module.so; do \
+    # VTS and the lua module must be present. NDK is optional — Debian
+    # may bundle it into the lua module rather than ship it separately.
+    for so in ngx_http_vhost_traffic_status_module.so ngx_http_lua_module.so; do \
         if [ ! -f "$MODULES_PATH/$so" ]; then \
             echo "SMOKE FAIL: $so not present at $MODULES_PATH" >&2; \
             exit 1; \

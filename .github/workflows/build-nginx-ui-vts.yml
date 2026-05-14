@@ -101,12 +101,14 @@ jobs:
           docker exec smoke sh -c '
             set -e
             MOD=$(nginx -V 2>&1 | grep -oE -- "--modules-path=[^ ]+" | sed "s/.*=//")
+            # VTS + lua are required. NDK is optional (Debian may bundle
+            # it into the lua module .so).
             for so in ngx_http_vhost_traffic_status_module.so \
-                      ndk_http_module.so \
                       ngx_http_lua_module.so; do
               test -f "$MOD/$so" || { echo "missing: $MOD/$so" >&2; exit 1; }
             done
-            echo "all module .so files present in $MOD"
+            echo "required .so files present in $MOD"
+            ls -la "$MOD"
           '
 
       - name: nginx -t (config validates with bouncer disabled)
