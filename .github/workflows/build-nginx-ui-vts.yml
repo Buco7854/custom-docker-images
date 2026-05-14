@@ -1,0 +1,153 @@
+name: Build nginx-ui + VTS module
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # Daily — picks up upstream changes
+  push:
+    branches: [main]
+    paths:
+      - 'nginx-ui-vts/**'
+      - '.github/workflows/build-nginx-ui-vts.yml'
+  workflow_dispatch:
+    inputs:
+      nginx_ui_tag:
+        description: 'uozi/nginx-ui tag to build on top of'
+        required: false
+        default: 'latest'
+      cs_nginx_bouncer_version:
+        description: 'Override cs-nginx-bouncer version (e.g. 1.1.6). Empty = latest.'
+        required: false
+        default: ''
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/nginx-ui-vts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image ref
+        run: |
+          echo "IMAGE=$(echo $IMAGE | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --- Build amd64 first for a quick smoke test --------------------
+      - name: Build amd64 image for smoke testing
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nginx-ui-vts
+          pull: true
+          load: true
+          platforms: linux/amd64
+          build-args: |
+            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: nginx-ui-vts:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Smoke test --------------------------------------------------
+      - name: Run container
+        run: |
+          docker run -d --name smoke \
+            -e RELOAD_API_KEY=smoke-test-key \
+            -e CROWDSEC_BOUNCER_ENABLED=false \
+            -p 127.0.0.1:9010:9010 \
+            nginx-ui-vts:smoke
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:9010/health >/dev/null 2>&1; then
+              echo "reload API up after ${i}s"; break
+            fi
+            sleep 1
+            if [ "$i" = "20" ]; then
+              echo "reload API never came up" >&2
+              docker logs smoke
+              exit 1
+            fi
+          done
+
+      - name: Check loaded modules
+        run: |
+          docker exec smoke sh -c '
+            set -e
+            MOD=$(nginx -V 2>&1 | grep -oE -- "--modules-path=[^ ]+" | sed "s/.*=//")
+            for so in ngx_http_vhost_traffic_status_module.so \
+                      ngx_http_lua_module.so; do
+              test -f "$MOD/$so" || { echo "missing: $MOD/$so" >&2; exit 1; }
+            done
+            echo "required .so files present in $MOD"
+          '
+
+      - name: nginx -t
+        run: docker exec smoke nginx -t
+
+      - name: reload API rejects without key, accepts with key
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+                   -X POST http://127.0.0.1:9010/reload)
+          test "$status" = "403" || { echo "expected 403, got $status" >&2; exit 1; }
+          curl -fsS -X POST -H 'X-API-Key: smoke-test-key' \
+               http://127.0.0.1:9010/test | grep -q '"status":"ok"'
+
+      - name: Container logs (always)
+        if: always()
+        run: docker logs smoke || true
+
+      - name: Tear down smoke container
+        if: always()
+        run: docker rm -f smoke || true
+
+      # --- Simple informational CVE scan (never fails) -----------------
+      # Just so we can glance at what's in the image. No gating.
+      - name: Trivy CVE scan (informational only)
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: nginx-ui-vts:smoke
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '0'
+
+      # --- Multi-arch build + push ------------------------------------
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nginx-ui-vts
+          pull: true
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            ${{ github.event.inputs.nginx_ui_tag && format('NGINX_UI_TAG={0}', github.event.inputs.nginx_ui_tag) || '' }}
+            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,11 @@
+# Example user crontab — mounted at /etc/cron.d/nginx-ui.crontab and read
+# by supercronic inside the container. Format is standard cron.
+
+# nightly: SQLite maintenance on the nginx-ui DB
+30 3 * * *   /usr/local/bin/maintain-nginx-ui-db.sh
+
+# daily: refresh security.txt when it's within 30 days of expiry
+0  4 * * *   /usr/local/bin/security-txt-renew.sh
+
+# every 2 hours: sweep stale request-body temp files
+0  */2 * * * /usr/local/bin/nginx-body-cleanup.sh

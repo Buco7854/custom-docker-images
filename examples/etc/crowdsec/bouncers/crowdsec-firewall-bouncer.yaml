@@ -1,0 +1,22 @@
+# crowdsec-firewall-bouncer config.
+# Fill in API_KEY after running:
+#   docker exec crowdsec cscli bouncers add firewall-bouncer
+mode: iptables
+update_frequency: 10s
+log_mode: stdout
+log_level: info
+# The bouncer runs with network_mode: host. The compose file publishes LAPI
+# on the host loopback (127.0.0.1:8080) specifically so this address works.
+api_url: http://127.0.0.1:8080/
+api_key: REPLACE_ME    # docker exec crowdsec cscli bouncers add firewall-bouncer
+disable_ipv6: false
+deny_action: DROP
+deny_log: false
+supported_decisions_types:
+  - ban
+blacklists_ipv4: crowdsec-blacklists
+blacklists_ipv6: crowdsec6-blacklists
+iptables_chains:
+  - INPUT
+  - FORWARD
+  - DOCKER-USER
