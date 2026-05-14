@@ -260,6 +260,10 @@ RUN set -eux; \
 
 # Runtime deps: reload API, scripts, cron, LuaJIT runtime, lua deps for the
 # CrowdSec bouncer.
+# LUA_RESTY_*_VERSION pin the LuaRocks versions; empty falls back to whatever
+# `luarocks install` picks as latest.
+ARG LUA_RESTY_HTTP_VERSION=
+ARG LUA_RESTY_STRING_VERSION=
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -268,8 +272,16 @@ RUN set -eux; \
         luarocks gettext-base; \
     # lua-resty-http isn't in Debian main; install via luarocks against Lua 5.1
     # (LuaJIT is bytecode-compatible with Lua 5.1).
-    luarocks-5.1 install lua-resty-http; \
-    luarocks-5.1 install lua-resty-string; \
+    if [ -n "${LUA_RESTY_HTTP_VERSION}" ]; then \
+        luarocks-5.1 install lua-resty-http "${LUA_RESTY_HTTP_VERSION}"; \
+    else \
+        luarocks-5.1 install lua-resty-http; \
+    fi; \
+    if [ -n "${LUA_RESTY_STRING_VERSION}" ]; then \
+        luarocks-5.1 install lua-resty-string "${LUA_RESTY_STRING_VERSION}"; \
+    else \
+        luarocks-5.1 install lua-resty-string; \
+    fi; \
     apt-get purge -y --auto-remove luarocks; \
     rm -rf /var/lib/apt/lists/* /root/.cache
 

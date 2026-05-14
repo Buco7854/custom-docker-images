@@ -64,6 +64,87 @@ jobs:
           echo "Resolved uozi/nginx-ui=${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      # Resolve every non-Debian-repo upstream to the newest version >= 7
+      # days old: VTS module, CrowdSec nginx bouncer, two LuaRocks rocks,
+      # and supercronic (also re-computes its SHA1 checksums).
+      - name: Resolve non-Debian upstream versions (>= 7 days old)
+        id: resolve_pkgs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CUTOFF="$(date -u -d '7 days ago' +%s)"
+
+          gh_get() {
+              curl -fsSL \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  "$1"
+          }
+
+          # Resolve newest tag matching $pat from $repo that is >= 7 days
+          # old. Tries /releases (has published_at) first, falls back to
+          # /tags + per-tag commit-date lookup for repos that don't publish
+          # formal GitHub releases (e.g. openresty/*).
+          resolve_gh() {
+              local repo="$1" pat="$2" tag pairs name sha d ts
+              tag="$(gh_get "https://api.github.com/repos/${repo}/releases?per_page=100" \
+                  | jq -r --arg pat "$pat" --argjson cutoff "$CUTOFF" '
+                      map(select(.tag_name | test($pat)))
+                      | map(. + {ts: ((.published_at // .created_at) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)})
+                      | map(select(.ts <= $cutoff))
+                      | sort_by(.ts) | reverse
+                      | .[0].tag_name // empty')"
+              if [ -n "$tag" ]; then echo "$tag"; return 0; fi
+
+              pairs="$(gh_get "https://api.github.com/repos/${repo}/tags?per_page=20" \
+                  | jq -r --arg pat "$pat" '.[] | select(.name | test($pat)) | "\(.name) \(.commit.sha)"')"
+              while IFS=' ' read -r name sha; do
+                  [ -z "$name" ] && continue
+                  d="$(gh_get "https://api.github.com/repos/${repo}/commits/${sha}" \
+                      | jq -r '.commit.committer.date')"
+                  ts="$(date -u -d "$d" +%s)"
+                  if [ "$ts" -le "$CUTOFF" ]; then echo "$name"; return 0; fi
+              done <<< "$pairs"
+
+              echo "ERROR: no tag in ${repo} matching ${pat} older than 7 days" >&2
+              return 1
+          }
+
+          VTS="$(resolve_gh vozlt/nginx-module-vts '^v?[0-9]+\.[0-9]+\.[0-9]+$')"
+          BOUNCER_TAG="$(resolve_gh crowdsecurity/cs-nginx-bouncer '^v?[0-9]+\.[0-9]+\.[0-9]+$')"
+          BOUNCER="${BOUNCER_TAG#v}"
+          LRH_TAG="$(resolve_gh ledgetech/lua-resty-http '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$')"
+          LRH="${LRH_TAG#v}"
+          LRS_TAG="$(resolve_gh openresty/lua-resty-string '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$')"
+          LRS="${LRS_TAG#v}"
+          SC="$(resolve_gh aptible/supercronic '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          echo "VTS=${VTS}"
+          echo "CS_NGINX_BOUNCER=${BOUNCER}"
+          echo "LUA_RESTY_HTTP=${LRH}"
+          echo "LUA_RESTY_STRING=${LRS}"
+          echo "SUPERCRONIC=${SC}"
+
+          # Recompute supercronic SHA1s for the resolved version.
+          mkdir -p /tmp/sc
+          curl -fsSL "https://github.com/aptible/supercronic/releases/download/${SC}/supercronic-linux-amd64" -o /tmp/sc/amd64
+          curl -fsSL "https://github.com/aptible/supercronic/releases/download/${SC}/supercronic-linux-arm64" -o /tmp/sc/arm64
+          SC_SHA1_AMD64="$(sha1sum /tmp/sc/amd64 | awk '{print $1}')"
+          SC_SHA1_ARM64="$(sha1sum /tmp/sc/arm64 | awk '{print $1}')"
+          echo "supercronic SHA1 amd64: ${SC_SHA1_AMD64}"
+          echo "supercronic SHA1 arm64: ${SC_SHA1_ARM64}"
+
+          {
+              echo "vts=${VTS}"
+              echo "bouncer=${BOUNCER}"
+              echo "lua_resty_http=${LRH}"
+              echo "lua_resty_string=${LRS}"
+              echo "supercronic=${SC}"
+              echo "supercronic_sha1_amd64=${SC_SHA1_AMD64}"
+              echo "supercronic_sha1_arm64=${SC_SHA1_ARM64}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -77,7 +158,13 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NGINX_UI_TAG=${{ steps.resolve_nginx_ui.outputs.tag }}
-            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+            VTS_VERSION=${{ steps.resolve_pkgs.outputs.vts }}
+            CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version || steps.resolve_pkgs.outputs.bouncer }}
+            LUA_RESTY_HTTP_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_http }}
+            LUA_RESTY_STRING_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_string }}
+            SUPERCRONIC_VERSION=${{ steps.resolve_pkgs.outputs.supercronic }}
+            SUPERCRONIC_SHA1_AMD64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_amd64 }}
+            SUPERCRONIC_SHA1_ARM64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_arm64 }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           tags: nginx-ui-vts:smoke
@@ -169,7 +256,13 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             NGINX_UI_TAG=${{ steps.resolve_nginx_ui.outputs.tag }}
-            ${{ github.event.inputs.cs_nginx_bouncer_version && format('CS_NGINX_BOUNCER_VERSION={0}', github.event.inputs.cs_nginx_bouncer_version) || '' }}
+            VTS_VERSION=${{ steps.resolve_pkgs.outputs.vts }}
+            CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version || steps.resolve_pkgs.outputs.bouncer }}
+            LUA_RESTY_HTTP_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_http }}
+            LUA_RESTY_STRING_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_string }}
+            SUPERCRONIC_VERSION=${{ steps.resolve_pkgs.outputs.supercronic }}
+            SUPERCRONIC_SHA1_AMD64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_amd64 }}
+            SUPERCRONIC_SHA1_ARM64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_arm64 }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           tags: |
