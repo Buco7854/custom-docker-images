@@ -1,0 +1,48 @@
+# Trivy ignore list with mandatory expiration.
+# Docs: https://trivy.dev/latest/docs/configuration/filtering/
+#
+# Each entry has an `expired_at` date. When that day passes, the CVE
+# re-enters the gate:
+#   * Upstream has rebuilt with the fix -> build passes, drop the entry.
+#   * Upstream hasn't rebuilt -> build fails, you decide: extend the
+#     ignore (and file an upstream issue), bump to a different upstream,
+#     or remove the affected binary.
+#
+# This file is intentionally short. Add to it only after reviewing the
+# CVE; never as a way to "silence" Trivy without thought.
+
+vulnerabilities:
+
+  # ---------------------------------------------------------------------
+  # Go stdlib CVEs from upstream binaries we don't compile.
+  # Affects: /usr/local/bin/nginx-ui (from uozi/nginx-ui base image)
+  #          /usr/local/bin/supercronic (from aptible/supercronic release)
+  # Fix: Go 1.26.3 (released). Picked up automatically when upstream
+  # rebuilds. nginx-ui flows in via Dependabot digest bumps; supercronic
+  # is pinned by SUPERCRONIC_VERSION and needs a manual bump.
+  # ---------------------------------------------------------------------
+  - id: CVE-2026-33811
+    reason: "Go stdlib in upstream binaries (nginx-ui, supercronic); fixed in 1.26.3, awaiting upstream rebuild"
+    expired_at: 2026-07-01
+  - id: CVE-2026-33814
+    reason: "Go stdlib HTTP/2 SETTINGS frame DoS; fixed in 1.26.3, awaiting upstream rebuild"
+    expired_at: 2026-07-01
+  - id: CVE-2026-39820
+    reason: "Go stdlib net/mail ParseAddress; fixed in 1.26.3, awaiting upstream rebuild"
+    expired_at: 2026-07-01
+  - id: CVE-2026-39836
+    reason: "Go stdlib Dial/LookupPort NUL byte panic — Windows only, we run on Linux"
+    expired_at: 2026-07-01
+  - id: CVE-2026-42499
+    reason: "Go stdlib consumePhrase DoS; fixed in 1.26.3, awaiting upstream rebuild"
+    expired_at: 2026-07-01
+
+  # ---------------------------------------------------------------------
+  # Moby/docker authorization bypass in nginx-ui's bundled Docker client.
+  # nginx-ui uses this to talk to /var/run/docker.sock when shown in
+  # its UI. Our setup never mounts the docker socket, so this code path
+  # is unreachable in our deployment.
+  # ---------------------------------------------------------------------
+  - id: CVE-2026-34040
+    reason: "Moby authz bypass — unreachable in our setup (no docker socket mounted into the container)"
+    expired_at: 2026-08-01

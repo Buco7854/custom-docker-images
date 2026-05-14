@@ -94,7 +94,7 @@ What's in place:
 - **Base image pinned by SHA256 digest**, not tag. Dependabot opens PRs when upstream `uozi/nginx-ui` changes; each bump is gated by smoke + CVE scan + cosign signing before publish.
 - **No `curl | bash` at build time.** The CrowdSec apt key is fetched over HTTPS and its **GPG fingerprint is verified** against a value pinned in the Dockerfile (`CROWDSEC_GPG_FINGERPRINT`) — build fails if it doesn't match.
 - **CrowdSec .deb hash pin (optional).** Set `CS_NGINX_BOUNCER_VERSION` + `CS_NGINX_BOUNCER_SHA256` and the build aborts if the downloaded `.deb` doesn't match byte-for-byte. Defends against the worst-case scenario where CrowdSec's GPG signing key itself is compromised — the attacker can sign anything, but the hash won't match the pinned value. The build always logs the computed hash so you can capture it for next time.
-- **CVE gate.** Every build runs `trivy` against the image. Any unpatched HIGH or CRITICAL CVE blocks the push to `:latest`.
+- **CVE gate.** Every build runs `trivy` against the image. Any unpatched HIGH or CRITICAL CVE blocks the push to `:latest`. Time-limited exceptions for CVEs in upstream binaries we can't fix live in [`.trivyignore.yaml`](../.trivyignore.yaml); each entry expires and re-enters the gate automatically.
 - **SBOM.** An SPDX SBOM is generated with `syft` for every build, attached as a workflow artifact and as a signed attestation on the published image.
 - **Cosign keyless signing.** Every published image is signed via GHA's OIDC token using Sigstore. No keys to manage.
 - **Build provenance + SBOM attestations** (`provenance: true`, `sbom: true` on the buildx push) — verifiable build trace.
