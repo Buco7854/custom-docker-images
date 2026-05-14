@@ -10,7 +10,7 @@ a small reload API, and `supercronic` for periodic maintenance.
 |---|---|
 | Dynamic modules | `nginx-module-vts`, `ngx_devel_kit`, `ngx_http_lua_module` — all built per-image against the exact nginx version shipped by the base, with `--with-compat`. |
 | VTS dashboard | `status.html` is baked into the VTS module via `tplToDefine.sh` at build time. |
-| CrowdSec lua bouncer | `cs-nginx-bouncer` installed at canonical paths (`/usr/local/lua/crowdsec/`, `/var/lib/crowdsec/lua/templates/`). The nginx snippet lives in `/usr/share/cs-nginx-bouncer/` so user bind mounts over `/etc/nginx` never hide it. Activated by adding **one line** to nginx.conf: `include /etc/nginx/crowdsec-include.conf;`. Off by default — flip on with `CROWDSEC_BOUNCER_ENABLED=true`. Supports AppSec/WAF. |
+| CrowdSec lua bouncer | Installed via the **official `crowdsec-nginx-bouncer` Debian package** — same paths, same defaults, same docs as a bare-metal install: `/usr/lib/crowdsec/lua/`, `/var/lib/crowdsec/lua/templates/`, `/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf`. The nginx snippet is stashed at `/usr/share/cs-nginx-bouncer/` so user bind mounts over `/etc/nginx` never hide it. Activated by adding **one line** to nginx.conf: `include /etc/nginx/crowdsec-include.conf;`. Off by default — flip on with `CROWDSEC_BOUNCER_ENABLED=true`. Supports AppSec/WAF. |
 | Reload API | `POST /reload` (auth: `X-API-Key: $RELOAD_API_KEY`) on `$RELOAD_API_PORT` (default 9010). Also `POST /test` (runs `nginx -t`), `GET /health`. |
 | Cron | `supercronic` reads `$CRONTAB_FILE` (default `/etc/cron.d/default.crontab`). Mount your own to override; set empty to disable. |
 | Maintenance scripts | `maintain-nginx-ui-db.sh`, `security-txt-renew.sh`, `nginx-body-cleanup.sh` |

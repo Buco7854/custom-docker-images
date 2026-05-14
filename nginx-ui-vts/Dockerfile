@@ -121,35 +121,51 @@ RUN set -eux; \
     make modules -j"$(nproc)"; \
     ls -la objs/
 
-# Build the cs-nginx-bouncer release tarball. `make release` clones the
-# matching lua-cs-bouncer at the version pinned in the bouncer's Makefile and
-# produces a tarball with the canonical install layout. Version resolved
-# dynamically (latest release tag) unless CS_NGINX_BOUNCER_VERSION is set.
+# Fetch the OFFICIAL CrowdSec nginx bouncer .deb from the upstream apt repo,
+# then extract files without running its postinst (which would try to
+# register with a non-existent local cscli). This pins us to the same files,
+# at the same canonical Debian paths, that anyone running
+# `apt install crowdsec-nginx-bouncer` on a Debian host would get:
+#
+#   /usr/lib/crowdsec/lua/                       lua modules
+#   /var/lib/crowdsec/lua/templates/             ban / captcha HTML
+#   /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+#   /etc/nginx/conf.d/crowdsec_nginx.conf        the http-level snippet
+#
+# CS_NGINX_BOUNCER_VERSION empty -> install whatever apt offers as latest.
+# Set it to a specific version (e.g. 1.1.6) to pin.
 RUN set -eux; \
-    CS_NGINX_BOUNCER_VERSION="$(gh-latest-tag crowdsecurity/cs-nginx-bouncer "${CS_NGINX_BOUNCER_VERSION}")"; \
-    echo "Using cs-nginx-bouncer=$CS_NGINX_BOUNCER_VERSION"; \
-    git clone --depth=1 --branch "$CS_NGINX_BOUNCER_VERSION" \
-        https://github.com/crowdsecurity/cs-nginx-bouncer.git /build/cs-nginx-bouncer; \
-    cd /build/cs-nginx-bouncer; \
-    make release; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg; \
+    # Add CrowdSec's apt repo. Using their install script is the upstream-
+    # supported way; it just drops a sources.list entry and a GPG key.
+    curl -fsSL https://install.crowdsec.net | bash; \
+    apt-get update; \
+    mkdir -p /build/bouncer-deb; \
+    cd /build/bouncer-deb; \
+    if [ -n "${CS_NGINX_BOUNCER_VERSION}" ]; then \
+        apt-get download "crowdsec-nginx-bouncer=${CS_NGINX_BOUNCER_VERSION}*"; \
+    else \
+        apt-get download crowdsec-nginx-bouncer; \
+    fi; \
+    deb="$(ls crowdsec-nginx-bouncer_*.deb)"; \
+    echo "downloaded: $deb"; \
     mkdir -p /build/bouncer-extracted; \
-    tar xzf crowdsec-nginx-bouncer.tgz -C /build/bouncer-extracted --strip-components=1
+    dpkg-deb -x "$deb" /build/bouncer-extracted
 
-# Assert the release tarball has the structure we expect. If upstream
-# restructures it, the build fails LOUDLY here rather than silently producing
-# a broken image. Anything missing is listed so the fix is obvious.
+# Assert the .deb has the structure we expect. If upstream restructures the
+# package, fail loudly here rather than silently producing a broken image.
 RUN set -eux; \
-    echo "--- cs-nginx-bouncer release contents ---"; \
-    find /build/bouncer-extracted -maxdepth 3 -printf '%P\n' | sort; \
-    echo "-----------------------------------------"; \
+    echo "--- crowdsec-nginx-bouncer .deb contents ---"; \
+    find /build/bouncer-extracted -maxdepth 4 -printf '%P\n' | sort; \
+    echo "--------------------------------------------"; \
     fail=0; \
     for path in \
-        lua-mod \
-        templates \
-        templates/ban.html \
-        templates/captcha.html \
-        nginx/crowdsec_nginx.conf \
-        crowdsec-nginx-bouncer.conf \
+        usr/lib/crowdsec/lua/crowdsec.lua \
+        var/lib/crowdsec/lua/templates/ban.html \
+        var/lib/crowdsec/lua/templates/captcha.html \
+        etc/nginx/conf.d/crowdsec_nginx.conf \
+        etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
     ; do \
         if [ ! -e "/build/bouncer-extracted/$path" ]; then \
             echo "ASSERT FAIL: /build/bouncer-extracted/$path is missing" >&2; \
@@ -158,7 +174,7 @@ RUN set -eux; \
     done; \
     if [ "$fail" -ne 0 ]; then \
         echo "" >&2; \
-        echo "cs-nginx-bouncer release layout changed. Update the COPY/install" >&2; \
+        echo "crowdsec-nginx-bouncer .deb layout changed. Update the COPY/install" >&2; \
         echo "logic in the Dockerfile to match the new structure." >&2; \
         exit 1; \
     fi
@@ -168,25 +184,30 @@ RUN set -eux; \
 ############################################################
 FROM uozi/nginx-ui:${NGINX_UI_TAG}
 
-# Runtime deps: reload API, scripts, cron, LuaJIT runtime, lua deps for the
-# CrowdSec bouncer. (Debian-based path; Alpine fallback kept for safety.)
+# Assert Debian base. uozi/nginx-ui has been Debian (currently trixie) for a
+# long time; if upstream ever switches to Alpine this build needs to be
+# reworked anyway, so fail fast.
 RUN set -eux; \
-    if command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache socat curl sqlite tzdata coreutils findutils \
-            luajit lua5.1 lua5.1-cjson lua5.1-resty-http gettext; \
-    else \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
-            socat curl sqlite3 tzdata ca-certificates findutils \
-            luajit libluajit-5.1-2 lua5.1 lua-cjson \
-            luarocks gettext-base; \
-        # lua-resty-http is not in Debian; install via luarocks against Lua 5.1
-        # (LuaJIT is bytecode-compatible with Lua 5.1).
-        luarocks-5.1 install lua-resty-http; \
-        luarocks-5.1 install lua-resty-string; \
-        apt-get purge -y --auto-remove luarocks; \
-        rm -rf /var/lib/apt/lists/* /root/.cache; \
+    if ! grep -qiE '^ID(_LIKE)?=.*(debian|ubuntu)' /etc/os-release; then \
+        echo "ERROR: base image is not Debian-family:" >&2; \
+        cat /etc/os-release >&2; \
+        exit 1; \
     fi
+
+# Runtime deps: reload API, scripts, cron, LuaJIT runtime, lua deps for the
+# CrowdSec bouncer.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        socat curl sqlite3 tzdata ca-certificates findutils \
+        luajit libluajit-5.1-2 lua5.1 lua-cjson \
+        luarocks gettext-base; \
+    # lua-resty-http isn't in Debian main; install via luarocks against Lua 5.1
+    # (LuaJIT is bytecode-compatible with Lua 5.1).
+    luarocks-5.1 install lua-resty-http; \
+    luarocks-5.1 install lua-resty-string; \
+    apt-get purge -y --auto-remove luarocks; \
+    rm -rf /var/lib/apt/lists/* /root/.cache
 
 # Supercronic — minimal cron daemon driven by a crontab file.
 ARG SUPERCRONIC_VERSION=v0.2.45
@@ -227,21 +248,21 @@ RUN set -eux; \
     done; \
     rm -rf /tmp/mods /tmp/modules_path
 
-# Install CrowdSec nginx bouncer assets. Lua + templates + base config go to
-# their canonical locations. The nginx snippet goes to /usr/share/ (not
-# /etc/nginx/conf.d/) so that user bind mounts over /etc/nginx never hide it.
-# A user enables the snippet by adding ONE include directive to their
-# nginx.conf:  include /etc/nginx/crowdsec-include.conf;
-# That file is managed by the entrypoint based on CROWDSEC_BOUNCER_ENABLED.
+# Install the CrowdSec nginx bouncer assets at their canonical Debian-package
+# paths. The .deb installs the http-level snippet to /etc/nginx/conf.d/ — we
+# instead stash it at /usr/share/cs-nginx-bouncer/ so user bind mounts over
+# /etc/nginx don't hide it. Users enable it by adding ONE include line to
+# their nginx.conf:  include /etc/nginx/crowdsec-include.conf;
+# The shim is managed by the entrypoint based on CROWDSEC_BOUNCER_ENABLED.
 COPY --from=builder /build/bouncer-extracted /tmp/bouncer
 RUN set -eux; \
-    mkdir -p /usr/local/lua/crowdsec /var/lib/crowdsec/lua/templates \
+    mkdir -p /usr/lib/crowdsec/lua /var/lib/crowdsec/lua/templates \
              /etc/crowdsec/bouncers /usr/share/cs-nginx-bouncer; \
-    cp -r /tmp/bouncer/lua-mod/.    /usr/local/lua/crowdsec/; \
-    cp -r /tmp/bouncer/templates/.  /var/lib/crowdsec/lua/templates/; \
-    cp /tmp/bouncer/nginx/crowdsec_nginx.conf \
+    cp -r /tmp/bouncer/usr/lib/crowdsec/lua/.            /usr/lib/crowdsec/lua/; \
+    cp -r /tmp/bouncer/var/lib/crowdsec/lua/templates/.  /var/lib/crowdsec/lua/templates/; \
+    cp /tmp/bouncer/etc/nginx/conf.d/crowdsec_nginx.conf \
        /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf; \
-    cp /tmp/bouncer/crowdsec-nginx-bouncer.conf \
+    cp /tmp/bouncer/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
        /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
     # Pre-render the two states the include shim can take. The entrypoint
     # picks one based on CROWDSEC_BOUNCER_ENABLED and symlinks it into place.
@@ -303,7 +324,7 @@ RUN set -eux; \
              /usr/share/cs-nginx-bouncer/crowdsec-include.conf.enabled \
              /usr/share/cs-nginx-bouncer/crowdsec-include.conf.disabled \
              /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf \
-             /usr/local/lua/crowdsec/crowdsec.lua; do \
+             /usr/lib/crowdsec/lua/crowdsec.lua; do \
         if [ ! -e "$f" ]; then \
             echo "SMOKE FAIL: expected bouncer asset $f is missing" >&2; \
             exit 1; \
