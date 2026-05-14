@@ -163,13 +163,13 @@ RUN set -eux; \
 #
 # CS_NGINX_BOUNCER_VERSION empty -> install whatever apt offers as latest.
 # Set it to a specific version (e.g. 1.1.6) to pin.
-# CrowdSec packagecloud GPG key — last-16-hex of the fingerprint, which is
-# embedded in the URL packagecloud serves. We fetch the key over HTTPS,
-# compute its fingerprint locally with gpg, and refuse to proceed unless it
-# matches. This is strictly better than `curl install.crowdsec.net | bash`,
-# which is what the upstream "install" instructions do — that pattern runs
-# arbitrary remote shell code at build time with no integrity check beyond TLS.
-ARG CROWDSEC_GPG_KEY_ID=9EB2753BF09DFB77
+# CrowdSec packagecloud GPG fingerprint, full 40-hex. We fetch the key
+# over HTTPS, compute its fingerprint locally with gpg, and refuse to
+# proceed unless it matches exactly. This is strictly better than
+# `curl install.crowdsec.net | bash`, which is what the upstream "install"
+# instructions do — that pattern runs arbitrary remote shell code at build
+# time with no integrity check beyond TLS.
+ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
 ARG CROWDSEC_DEBIAN_RELEASE=trixie
 
 # When BOTH are set: pin to this exact .deb. The build aborts if either the
@@ -197,15 +197,13 @@ RUN set -eux; \
     curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /tmp/crowdsec.key; \
     fpr="$(gpg --show-keys --with-fingerprint --with-colons /tmp/crowdsec.key \
             | awk -F: '/^fpr/ {print $10; exit}')"; \
-    case "$fpr" in \
-        *${CROWDSEC_GPG_KEY_ID}) \
-            echo "CrowdSec GPG fingerprint verified: $fpr" ;; \
-        *) \
-            echo "ERROR: CrowdSec GPG fingerprint mismatch." >&2; \
-            echo "  expected suffix: ${CROWDSEC_GPG_KEY_ID}" >&2; \
-            echo "  got fingerprint: $fpr" >&2; \
-            exit 1 ;; \
-    esac; \
+    if [ "$fpr" != "${CROWDSEC_GPG_FINGERPRINT}" ]; then \
+        echo "ERROR: CrowdSec GPG fingerprint mismatch." >&2; \
+        echo "  expected: ${CROWDSEC_GPG_FINGERPRINT}" >&2; \
+        echo "  got:      $fpr" >&2; \
+        exit 1; \
+    fi; \
+    echo "CrowdSec GPG fingerprint verified: $fpr"; \
     mkdir -p /usr/share/keyrings; \
     gpg --dearmor < /tmp/crowdsec.key > /usr/share/keyrings/crowdsec.gpg; \
     rm /tmp/crowdsec.key; \
