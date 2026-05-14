@@ -12,13 +12,19 @@
 # the matching nginx source, compile all dynamic modules against it with
 # --with-compat, then copy the .so files + bouncer assets into the final
 # image. Runtime LuaJIT + lua-resty-* deps are installed in the final stage.
-
-ARG NGINX_UI_TAG=latest
+#
+# SUPPLY-CHAIN PINNING — the base image is pinned by SHA256 digest, not tag.
+# Dependabot's docker ecosystem opens PRs to bump the digest; each bump goes
+# through the same smoke + CVE scan + cosign signing pipeline before publish.
+# The tag-after-image-name is informational only (for human readability);
+# what's actually pulled is the digest. To override at build time:
+#   docker build --build-arg NGINX_UI_REF=uozi/nginx-ui@sha256:...
+ARG NGINX_UI_REF=uozi/nginx-ui:latest@sha256:18e009213e949373523861732bbef0af0d076c8d1b593b8b66bf873f70b4be5c
 
 ############################################################
 # Stage 1: discover nginx version + modules path
 ############################################################
-FROM uozi/nginx-ui:${NGINX_UI_TAG} AS discover
+FROM ${NGINX_UI_REF} AS discover
 
 RUN set -eux; \
     nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /tmp/nginx_version; \
@@ -134,12 +140,36 @@ RUN set -eux; \
 #
 # CS_NGINX_BOUNCER_VERSION empty -> install whatever apt offers as latest.
 # Set it to a specific version (e.g. 1.1.6) to pin.
+# CrowdSec packagecloud GPG key — last-16-hex of the fingerprint, which is
+# embedded in the URL packagecloud serves. We fetch the key over HTTPS,
+# compute its fingerprint locally with gpg, and refuse to proceed unless it
+# matches. This is strictly better than `curl install.crowdsec.net | bash`,
+# which is what the upstream "install" instructions do — that pattern runs
+# arbitrary remote shell code at build time with no integrity check beyond TLS.
+ARG CROWDSEC_GPG_KEY_ID=9EB2753BF09DFB77
+ARG CROWDSEC_DEBIAN_RELEASE=trixie
+
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg; \
-    # Add CrowdSec's apt repo. Using their install script is the upstream-
-    # supported way; it just drops a sources.list entry and a GPG key.
-    curl -fsSL https://install.crowdsec.net | bash; \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg dirmngr; \
+    # Fetch the key, verify fingerprint, install into keyring dir.
+    curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /tmp/crowdsec.key; \
+    fpr="$(gpg --show-keys --with-fingerprint --with-colons /tmp/crowdsec.key \
+            | awk -F: '/^fpr/ {print $10; exit}')"; \
+    case "$fpr" in \
+        *${CROWDSEC_GPG_KEY_ID}) \
+            echo "CrowdSec GPG fingerprint verified: $fpr" ;; \
+        *) \
+            echo "ERROR: CrowdSec GPG fingerprint mismatch." >&2; \
+            echo "  expected suffix: ${CROWDSEC_GPG_KEY_ID}" >&2; \
+            echo "  got fingerprint: $fpr" >&2; \
+            exit 1 ;; \
+    esac; \
+    mkdir -p /usr/share/keyrings; \
+    gpg --dearmor < /tmp/crowdsec.key > /usr/share/keyrings/crowdsec.gpg; \
+    rm /tmp/crowdsec.key; \
+    echo "deb [signed-by=/usr/share/keyrings/crowdsec.gpg] https://packagecloud.io/crowdsec/crowdsec/debian/ ${CROWDSEC_DEBIAN_RELEASE} main" \
+        > /etc/apt/sources.list.d/crowdsec.list; \
     apt-get update; \
     mkdir -p /build/bouncer-deb; \
     cd /build/bouncer-deb; \
@@ -182,7 +212,10 @@ RUN set -eux; \
 ############################################################
 # Stage 3: final image on top of nginx-ui
 ############################################################
-FROM uozi/nginx-ui:${NGINX_UI_TAG}
+# Re-declare the ARG so it's available in this stage too. Same digest pin
+# as the discover stage above.
+ARG NGINX_UI_REF
+FROM ${NGINX_UI_REF}
 
 # Assert Debian base. uozi/nginx-ui has been Debian (currently trixie) for a
 # long time; if upstream ever switches to Alpine this build needs to be

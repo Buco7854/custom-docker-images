@@ -87,6 +87,32 @@ The entrypoint manages that shim:
 
 The example `nginx.conf` in [`../examples/nginx/`](../examples/nginx/nginx.conf) already has the include + the required `lua_*` directives at the http level.
 
+## Supply-chain hardening
+
+What's in place:
+
+- **Base image pinned by SHA256 digest**, not tag. Dependabot opens PRs when upstream `uozi/nginx-ui` changes; each bump is gated by smoke + CVE scan + cosign signing before publish.
+- **No `curl | bash` at build time.** The CrowdSec apt key is fetched over HTTPS and its **GPG fingerprint is verified** against a value pinned in the Dockerfile (`CROWDSEC_GPG_KEY_ID`) — build fails if it doesn't match.
+- **CVE gate.** Every build runs `trivy` against the image. Any unpatched HIGH or CRITICAL CVE blocks the push to `:latest`.
+- **SBOM.** An SPDX SBOM is generated with `syft` for every build, attached as a workflow artifact and as a signed attestation on the published image.
+- **Cosign keyless signing.** Every published image is signed via GHA's OIDC token using Sigstore. No keys to manage.
+- **Build provenance + SBOM attestations** (`provenance: true`, `sbom: true` on the buildx push) — verifiable build trace.
+
+### Verifying an image you pulled
+
+```bash
+# Image came from this repo's CI:
+cosign verify ghcr.io/<owner>/nginx-ui-vts:latest \
+  --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Inspect the signed SBOM:
+cosign verify-attestation --type spdxjson ghcr.io/<owner>/nginx-ui-vts:latest \
+  --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json
+```
+
 ## Reload API
 
 ```bash

@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Pin the base image (uozi/nginx-ui) by SHA256 digest in the Dockerfile.
+  # Dependabot detects `image:tag@sha256:...` and opens PRs to bump the digest.
+  # Each PR runs through the smoke + Trivy + cosign pipeline before any
+  # human merge — so even auto-merged bumps are CVE-gated.
+  - package-ecosystem: docker
+    directory: /nginx-ui-vts
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "deps(docker)"
+
+  # GitHub Actions used by our workflow. Bumps come in as PRs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "deps(ci)"

@@ -9,12 +9,12 @@ on:
       - '.github/workflows/build-nginx-ui-vts.yml'
   workflow_dispatch:
     inputs:
-      nginx_ui_tag:
-        description: 'uozi/nginx-ui tag to build on top of'
+      nginx_ui_ref:
+        description: 'Override uozi/nginx-ui ref (e.g. uozi/nginx-ui@sha256:...). Empty = use the digest pinned in the Dockerfile.'
         required: false
-        default: 'latest'
+        default: ''
       cs_nginx_bouncer_version:
-        description: 'Override cs-nginx-bouncer version (e.g. v1.1.3). Empty = latest.'
+        description: 'Override cs-nginx-bouncer version (e.g. 1.1.6). Empty = latest.'
         required: false
         default: ''
 
@@ -22,22 +22,25 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     permissions:
-      packages: write
       contents: read
+      packages: write
+      id-token: write    # cosign keyless via GHA OIDC
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/nginx-ui-vts
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set lowercase owner
-        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Set lowercase image ref
+        run: |
+          echo "IMAGE=$(echo $IMAGE | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
       # -------------------------------------------------------------------
-      # Stage 1: build amd64 only, load into the local Docker daemon so we
-      # can actually run it for smoke tests. Multi-arch + push come later,
-      # gated on the smoke test passing.
+      # Stage 1: build amd64 only, load locally so we can smoke-test it.
+      # Multi-arch + push come later, gated on every check below passing.
       # -------------------------------------------------------------------
       - name: Build amd64 image for smoke testing
         uses: docker/build-push-action@v5
@@ -47,15 +50,14 @@ jobs:
           load: true
           platforms: linux/amd64
           build-args: |
-            NGINX_UI_TAG=${{ github.event.inputs.nginx_ui_tag || 'latest' }}
+            NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
           tags: nginx-ui-vts:smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # -------------------------------------------------------------------
-      # Stage 2: smoke test the image. If anything fails, the workflow
-      # stops here and `:latest` on the registry is NOT updated.
+      # Stage 2: functional smoke test.
       # -------------------------------------------------------------------
       - name: Run container
         run: |
@@ -64,7 +66,6 @@ jobs:
             -e CROWDSEC_BOUNCER_ENABLED=false \
             -p 127.0.0.1:9010:9010 \
             nginx-ui-vts:smoke
-          # Give the entrypoint a moment to start the reload API + nginx
           for i in $(seq 1 20); do
             if curl -fsS http://127.0.0.1:9010/health >/dev/null 2>&1; then
               echo "reload API up after ${i}s"; break
@@ -93,7 +94,7 @@ jobs:
       - name: nginx -t (config validates with bouncer disabled)
         run: docker exec smoke nginx -t
 
-      - name: nginx -V mentions --with-compat (dynamic modules will load)
+      - name: nginx -V mentions --with-compat
         run: |
           if ! docker exec smoke sh -c 'nginx -V 2>&1' | grep -q -- '--with-compat'; then
             echo "upstream nginx is NOT built with --with-compat; dynamic modules may fail" >&2
@@ -122,30 +123,99 @@ jobs:
         run: docker rm -f smoke || true
 
       # -------------------------------------------------------------------
-      # Stage 3: only if all smoke checks passed, build multi-arch and push
-      # to :latest. Reuses the build cache so this is fast.
+      # Stage 3: CVE gate. Block the push if anything HIGH or CRITICAL is
+      # unpatched. SARIF output is also uploaded so it shows up in GitHub's
+      # Security tab for visibility on lower-severity findings.
+      # -------------------------------------------------------------------
+      - name: Trivy CVE scan (block on HIGH+CRITICAL)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: nginx-ui-vts:smoke
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      # -------------------------------------------------------------------
+      # Stage 4: SBOM. Attached to the workflow run; cosign also signs it
+      # alongside the image below so consumers can verify it.
+      # -------------------------------------------------------------------
+      - name: Generate SBOM (SPDX) with syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: nginx-ui-vts:smoke
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom-spdx.json
+
+      # -------------------------------------------------------------------
+      # Stage 5: multi-arch build + push (we only get here if every gate
+      # above passed). Tagging both :latest and :sha-<short> for traceability.
       # -------------------------------------------------------------------
       - name: Set up QEMU (for arm64 build)
         uses: docker/setup-qemu-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-arch :latest
+      - name: Build and push multi-arch
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: ./nginx-ui-vts
           pull: true
           push: true
           platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
           build-args: |
-            NGINX_UI_TAG=${{ github.event.inputs.nginx_ui_tag || 'latest' }}
+            NGINX_UI_REF=${{ github.event.inputs.nginx_ui_ref }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version }}
           tags: |
-            ghcr.io/${{ env.OWNER }}/nginx-ui-vts:latest
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # -------------------------------------------------------------------
+      # Stage 6: sign with cosign keyless (Sigstore via GHA OIDC).
+      # No keys to manage. Anyone can verify the published image came from
+      # this workflow with:
+      #   cosign verify ghcr.io/<owner>/nginx-ui-vts:latest \
+      #       --certificate-identity-regexp '^https://github\.com/<owner>/custom-docker-images/' \
+      #       --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # -------------------------------------------------------------------
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the published image (keyless)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attach SBOM to the image (signed)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${IMAGE}@${DIGEST}"
