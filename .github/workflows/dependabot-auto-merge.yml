@@ -1,0 +1,51 @@
+name: Dependabot auto-merge
+
+# Auto-merge Dependabot PRs once every required status check (smoke,
+# Trivy CVE gate, cosign signing — same gates a manual push goes through)
+# has passed. If any gate fails, the PR sits open and waits for a human.
+#
+# Required setup in the repo:
+#   * Settings -> General -> Pull Requests -> "Allow auto-merge" enabled.
+#   * Settings -> Branches -> branch protection on `main` requiring the
+#     `build-and-test` job to pass before merge.
+# Without those two, this workflow runs but GitHub won't actually merge.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Anything Dependabot opens here is gated by `build-and-test` (smoke +
+      # Trivy + cosign). If a bump is genuinely unsafe (broken module, CVE)
+      # the gate fails, the merge waits, you investigate. Documenting the
+      # allowed update types just so it's easy to tighten later if you ever
+      # want to require human review on major bumps.
+      - name: Queue auto-merge once CI passes
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment on skipped major bumps
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "Major version bump — leaving for human review. CI gates still apply if you merge manually."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
