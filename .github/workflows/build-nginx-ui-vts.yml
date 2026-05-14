@@ -139,7 +139,8 @@ jobs:
       # Security tab for visibility on lower-severity findings.
       # -------------------------------------------------------------------
       - name: Trivy CVE scan (block on HIGH+CRITICAL)
-        uses: aquasecurity/trivy-action@master
+        id: trivy
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: nginx-ui-vts:smoke
           format: sarif
@@ -149,9 +150,14 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
 
+      # Upload only if Trivy actually wrote a SARIF file (it may not have
+      # if Trivy itself crashed, or if an earlier step failed and Trivy
+      # was skipped). Don't fail the job on upload errors — the Trivy
+      # step above is the actual gate.
       - name: Upload Trivy SARIF to Security tab
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy
