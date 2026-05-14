@@ -170,7 +170,12 @@ RUN set -eux; \
 # instructions do — that pattern runs arbitrary remote shell code at build
 # time with no integrity check beyond TLS.
 ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
-ARG CROWDSEC_DEBIAN_RELEASE=trixie
+# Note: this is the release name CrowdSec's packagecloud repo serves, NOT
+# necessarily the Debian release the image is running on. CrowdSec doesn't
+# (yet) publish a trixie repo, but their nginx-bouncer .deb is pure lua + a
+# config file — no native binaries — so the bookworm package works fine on
+# trixie. Bump this when CrowdSec adds a trixie repo.
+ARG CROWDSEC_DEBIAN_RELEASE=bookworm
 
 # When BOTH are set: pin to this exact .deb. The build aborts if either the
 # version pulled from apt isn't `CS_NGINX_BOUNCER_VERSION` or its sha256
