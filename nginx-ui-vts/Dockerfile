@@ -260,27 +260,23 @@ RUN set -eux; \
 
 # Runtime deps: reload API, scripts, cron, LuaJIT runtime, lua deps for the
 # CrowdSec bouncer.
-# LUA_RESTY_*_VERSION pin the LuaRocks versions; empty falls back to whatever
-# `luarocks install` picks as latest.
+# LUA_RESTY_HTTP_VERSION pins the LuaRocks version; empty falls back to
+# whatever `luarocks install` picks as latest. lua-resty-http is the only
+# rock the bouncer actually requires (`require "resty.http"`); cjson comes
+# from Debian's lua-cjson, and luajit ships bit/ffi internally. The
+# upstream .deb's postinst installs lua-resty-http via luarocks too — we
+# do it here because we deliberately skip running that postinst.
 ARG LUA_RESTY_HTTP_VERSION=
-ARG LUA_RESTY_STRING_VERSION=
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         socat curl sqlite3 tzdata ca-certificates findutils \
         luajit libluajit-5.1-2 lua5.1 lua-cjson \
         luarocks gettext-base; \
-    # lua-resty-http isn't in Debian main; install via luarocks against Lua 5.1
-    # (LuaJIT is bytecode-compatible with Lua 5.1).
     if [ -n "${LUA_RESTY_HTTP_VERSION}" ]; then \
         luarocks-5.1 install lua-resty-http "${LUA_RESTY_HTTP_VERSION}"; \
     else \
         luarocks-5.1 install lua-resty-http; \
-    fi; \
-    if [ -n "${LUA_RESTY_STRING_VERSION}" ]; then \
-        luarocks-5.1 install lua-resty-string "${LUA_RESTY_STRING_VERSION}"; \
-    else \
-        luarocks-5.1 install lua-resty-string; \
     fi; \
     apt-get purge -y --auto-remove luarocks; \
     rm -rf /var/lib/apt/lists/* /root/.cache

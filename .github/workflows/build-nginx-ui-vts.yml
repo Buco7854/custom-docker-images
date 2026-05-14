@@ -116,14 +116,11 @@ jobs:
           BOUNCER="${BOUNCER_TAG#v}"
           LRH_TAG="$(resolve_gh ledgetech/lua-resty-http '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$')"
           LRH="${LRH_TAG#v}"
-          LRS_TAG="$(resolve_gh openresty/lua-resty-string '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$')"
-          LRS="${LRS_TAG#v}"
           SC="$(resolve_gh aptible/supercronic '^v[0-9]+\.[0-9]+\.[0-9]+$')"
 
           echo "VTS=${VTS}"
           echo "CS_NGINX_BOUNCER=${BOUNCER}"
           echo "LUA_RESTY_HTTP=${LRH}"
-          echo "LUA_RESTY_STRING=${LRS}"
           echo "SUPERCRONIC=${SC}"
 
           # Recompute supercronic SHA1s for the resolved version.
@@ -139,7 +136,6 @@ jobs:
               echo "vts=${VTS}"
               echo "bouncer=${BOUNCER}"
               echo "lua_resty_http=${LRH}"
-              echo "lua_resty_string=${LRS}"
               echo "supercronic=${SC}"
               echo "supercronic_sha1_amd64=${SC_SHA1_AMD64}"
               echo "supercronic_sha1_arm64=${SC_SHA1_ARM64}"
@@ -161,7 +157,6 @@ jobs:
             VTS_VERSION=${{ steps.resolve_pkgs.outputs.vts }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version || steps.resolve_pkgs.outputs.bouncer }}
             LUA_RESTY_HTTP_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_http }}
-            LUA_RESTY_STRING_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_string }}
             SUPERCRONIC_VERSION=${{ steps.resolve_pkgs.outputs.supercronic }}
             SUPERCRONIC_SHA1_AMD64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_amd64 }}
             SUPERCRONIC_SHA1_ARM64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_arm64 }}
@@ -259,7 +254,6 @@ jobs:
             VTS_VERSION=${{ steps.resolve_pkgs.outputs.vts }}
             CS_NGINX_BOUNCER_VERSION=${{ github.event.inputs.cs_nginx_bouncer_version || steps.resolve_pkgs.outputs.bouncer }}
             LUA_RESTY_HTTP_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_http }}
-            LUA_RESTY_STRING_VERSION=${{ steps.resolve_pkgs.outputs.lua_resty_string }}
             SUPERCRONIC_VERSION=${{ steps.resolve_pkgs.outputs.supercronic }}
             SUPERCRONIC_SHA1_AMD64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_amd64 }}
             SUPERCRONIC_SHA1_ARM64=${{ steps.resolve_pkgs.outputs.supercronic_sha1_arm64 }}
