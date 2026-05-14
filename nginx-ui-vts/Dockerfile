@@ -70,10 +70,14 @@ ARG LUA_NGINX_VERSION=
 ARG VTS_VERSION=
 ARG CS_NGINX_BOUNCER_VERSION=
 
-# Resolves "latest" tag for a repo (owner/repo), prints it on stdout. Aborts
-# the build on failure rather than silently falling back. Uses GH_TOKEN if
-# present to dodge the unauthenticated GitHub API rate limit (60/hr per
-# shared runner IP -> easy to hit). With a token: 5000/hr.
+# Resolves "latest" tag for a repo (owner/repo), prints it on stdout.
+# Tries /releases/latest first (works for repos that publish formal
+# releases), then falls back to /tags?per_page=1 — necessary for repos
+# like openresty/lua-nginx-module that push tags but never click
+# "publish release" in GitHub's UI (releases/latest -> 404).
+#
+# Uses $GH_TOKEN for authentication if set; without it the API rate limit
+# is 60/hr per (shared) runner IP and easy to trip. With it: 5000/hr.
 RUN set -eux; \
     cat > /usr/local/bin/gh-latest-tag <<'SH'
 #!/bin/sh
@@ -81,15 +85,27 @@ set -eu
 repo="$1"
 override="${2:-}"
 if [ -n "$override" ]; then echo "$override"; exit 0; fi
-url="https://api.github.com/repos/${repo}/releases/latest"
-if [ -n "${GH_TOKEN:-}" ]; then
-    resp="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$url")"
-else
-    resp="$(curl -fsSL "$url")"
-fi
+
+fetch() {
+    # No -f: we want to get the body and decide ourselves, so a 404 on
+    # /releases/latest cleanly falls through to /tags instead of aborting.
+    if [ -n "${GH_TOKEN:-}" ]; then
+        curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "$1" || true
+    else
+        curl -sSL "$1" || true
+    fi
+}
+
+resp="$(fetch "https://api.github.com/repos/${repo}/releases/latest")"
 tag="$(printf '%s' "$resp" | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*"\([^"]\+\)"$/\1/')"
+
 if [ -z "$tag" ]; then
-    echo "ERROR: could not resolve latest tag for $repo from $url" >&2
+    resp="$(fetch "https://api.github.com/repos/${repo}/tags?per_page=1")"
+    tag="$(printf '%s' "$resp" | grep -oE '"name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*"\([^"]\+\)"$/\1/')"
+fi
+
+if [ -z "$tag" ]; then
+    echo "ERROR: could not resolve a tag for $repo (no releases and no tags?)" >&2
     exit 1
 fi
 echo "$tag"
