@@ -3,25 +3,35 @@
 A docker-compose setup for nginx-ui-vts + Certwarden + CrowdSec (LAPI + AppSec)
 + nginx lua bouncer + firewall bouncer + CrowdSec web UI.
 
-Design choice: **files live on the host at their canonical paths**, same as
-a non-containerised install. `/etc/nginx/nginx.conf` is `/etc/nginx/nginx.conf`,
-`/var/log/nginx/access.log` is `/var/log/nginx/access.log`. SSH in, `vi`,
-done. The compose file just glues the containers to those paths.
+Design choice: things an admin SSH-edits live at their canonical host paths
+(`/etc/nginx`, `/etc/crowdsec`, `/var/log/nginx`, `/etc/ssl/<domain>/`).
+App state lives in `<thing>_data/` directories next to the compose file so
+the stack stays portable.
 
 ## Host directory map
+
+### Absolute (canonical) paths
 
 | Host path | Container path | Owner |
 |---|---|---|
 | `/etc/nginx/` | `/etc/nginx/` (nginx-ui) | full nginx config tree |
-| `/etc/nginx-ui/` | `/etc/nginx-ui/` (nginx-ui) | nginx-ui DB + crontab + optional template overrides |
 | `/etc/crowdsec/` | `/etc/crowdsec/` (crowdsec) | CrowdSec config per upstream docs |
-| `/etc/certwarden/scripts/` | `/scripts/` (certwarden) | post-issuance hook scripts |
 | `/etc/ssl/<domain>/` | `/etc/ssl/<domain>/` (nginx-ui RO, certwarden RW) | TLS material per domain |
 | `/var/log/nginx/` | `/var/log/nginx/` (nginx-ui RW, crowdsec RO) | nginx logs |
-| `/var/lib/crowdsec/` | `/var/lib/crowdsec/` (crowdsec) | LAPI SQLite DB |
-| `/var/lib/crowdsec-web-ui/` | `/app/data/` (crowdsec-web-ui) | web UI state (separate DB) |
-| `/var/lib/certwarden/` | `/app/data/` (certwarden) | Certwarden DB + ACME account keys |
-| `/var/www/` | `/var/www/` (nginx-ui) | served content, ACME webroot |
+
+### Relative paths (created next to this compose file)
+
+| Host path | Container path | Owner |
+|---|---|---|
+| `./nginx_ui_data/` | `/etc/nginx-ui/` (nginx-ui) | nginx-ui SQLite DB |
+| `./crowdsec_data/` | `/var/lib/crowdsec/` (crowdsec) | LAPI SQLite DB |
+| `./crowdsec_web_ui_data/` | `/app/data/` (crowdsec-web-ui) | web UI state — *separate* from LAPI DB |
+| `./certwarden_data/` | `/app/data/` (certwarden) | Certwarden DB + ACME account keys |
+| `./certwarden_scripts/` | `/scripts/` (certwarden, ro) | post-issuance hooks (shipped in this repo) |
+| `./www/` | `/var/www/` (nginx-ui) | served content + ACME webroot |
+| `./nginx_crontab` | `/etc/cron.d/nginx-ui.crontab` (nginx-ui, ro) | supercronic schedule |
+
+Docker auto-creates the relative dirs on first start.
 
 ## What's in this directory
 
@@ -30,6 +40,9 @@ done. The compose file just glues the containers to those paths.
 ├── README.md                         (this file)
 ├── docker-compose.yml
 ├── .env.example
+├── nginx_crontab                     copied as a single file into the container
+├── certwarden_scripts/               bind-mounted into certwarden
+│   └── write_cert.sh
 └── etc/                              copy contents to /etc on the host
     ├── nginx/
     │   ├── nginx.conf                works as-is; edit to taste
@@ -37,17 +50,12 @@ done. The compose file just glues the containers to those paths.
     │   ├── sites-available/
     │   ├── sites-enabled/
     │   └── snippets/
-    ├── nginx-ui/
-    │   └── crontab                   read by the nginx-ui container's supercronic
-    ├── crowdsec/
-    │   ├── acquis.yaml               nginx log inputs + AppSec listener
-    │   ├── parsers/s02-enrich/
-    │   │   └── whitelists.yaml       starter whitelist (localhost, RFC1918, docker0)
-    │   └── bouncers/
-    │       └── crowdsec-firewall-bouncer.yaml
-    └── certwarden/
-        └── scripts/
-            └── write_cert.sh
+    └── crowdsec/
+        ├── acquis.yaml               nginx log inputs + AppSec listener
+        ├── parsers/s02-enrich/
+        │   └── whitelists.yaml       starter whitelist (localhost, RFC1918, docker0)
+        └── bouncers/
+            └── crowdsec-firewall-bouncer.yaml
 ```
 
 ## First-time setup
@@ -56,11 +64,9 @@ done. The compose file just glues the containers to those paths.
 # 1. Seed configs into /etc.
 sudo cp -rn etc/. /etc/
 
-# 2. Create the writable state dirs (host owns these).
-sudo mkdir -p /var/log/nginx /var/www \
-              /var/lib/crowdsec \
-              /var/lib/crowdsec-web-ui \
-              /var/lib/certwarden
+# 2. Create the logs dir on the host (the only writable absolute path
+#    that isn't auto-managed). /etc/ssl exists already on any standard distro.
+sudo mkdir -p /var/log/nginx
 
 # 3. Fill in .env.
 cp .env.example .env
@@ -82,32 +88,29 @@ docker compose up -d
 
 ## Adding a domain
 
-1. Configure Certwarden (web UI at port 4055) to issue a cert for `example.com`. It writes
-   `/etc/ssl/example.com/fullchain.pem` and `/etc/ssl/example.com/privkey.pem` via the
-   post-issuance script.
-2. Add a site config under `/etc/nginx/sites-available/example.com.conf`, symlink into
+1. Issue a cert through Certwarden's UI (port 4055). Its post-issuance hook writes
+   `/etc/ssl/<domain>/fullchain.pem` and `/etc/ssl/<domain>/privkey.pem`.
+2. Add a site config under `/etc/nginx/sites-available/<domain>.conf`, symlink into
    `sites-enabled/`, or use the nginx-ui web UI (port 9000).
-3. Reload nginx — the nginx-ui UI has a button, or:
+3. Reload nginx — nginx-ui has a button, or:
    `curl -X POST -H "X-API-Key: $RELOAD_API_KEY" http://127.0.0.1:9010/reload`
 
 ## Caveats
 
 - **`/etc/ssl` is bind-mounted wholesale.** The host must have the
-  `ca-certificates` package (standard on any server distro) so the containers can
-  still verify outbound TLS via `/etc/ssl/certs/ca-certificates.crt`.
-- **The host must not already run a system nginx or crowdsec.** Their config dirs
-  would collide.
-- **`/var/log/nginx` is shared** between the nginx-ui container (rw, writes logs)
-  and the crowdsec container (ro, parses them). Logrotate on the host is fine —
-  nginx-ui reopens log fds via the reload API.
-- **Backups:** the four host paths you care about are `/etc/{nginx,nginx-ui,crowdsec,certwarden,ssl}` and `/var/lib/{crowdsec,crowdsec-web-ui,certwarden}`. `/var/log/nginx` and `/var/www` you can decide on case-by-case.
+  `ca-certificates` package installed (standard on any server distro) so the
+  containers still verify outbound TLS via `/etc/ssl/certs/ca-certificates.crt`.
+- **The host must not already run a system nginx or crowdsec.** Their config
+  dirs would collide.
+- **`/var/log/nginx` is shared** between nginx-ui (rw) and crowdsec (ro). Host
+  logrotate is fine — nginx-ui reopens log fds via the reload API.
+- **Backups:** absolute paths to grab are `/etc/{nginx,crowdsec,ssl}`. Relative
+  paths are everything ending in `_data/` next to this compose file, plus
+  `./www/`. `/var/log/nginx/` you can decide on case-by-case.
 
 ## Custom ban / captcha pages
 
-The image ships sensible defaults. To override, drop your own HTML at:
-```
-/etc/nginx-ui/bouncer-templates/ban.html
-/etc/nginx-ui/bouncer-templates/captcha.html
-```
-then uncomment the two corresponding bind mounts in `docker-compose.yml`. The
+Image ships sensible defaults. To override, create `./bouncer_templates/`
+next to this compose file with your own `ban.html` / `captcha.html`, then
+uncomment the two corresponding bind mounts in `docker-compose.yml`. The
 captcha template must contain `{{captcha_site_key}}` — see the bouncer docs.

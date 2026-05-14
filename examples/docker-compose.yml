@@ -1,36 +1,40 @@
 # Reverse-proxy stack: nginx-ui-vts + Certwarden + CrowdSec (LAPI + AppSec)
 # + nginx lua bouncer + firewall bouncer + CrowdSec web UI.
 #
-# Filesystem layout — everything lives where it would on a non-containerised
-# host, so SSH-in muscle memory still works:
+# Layout — config and logs at canonical host paths, app state in relative
+# dirs next to this compose file:
 #
-#   /etc/nginx/                          full nginx config tree
-#   /etc/nginx-ui/                       nginx-ui app data + DB + crontab
-#   /etc/crowdsec/                       CrowdSec config tree (per upstream docs)
-#   /etc/certwarden/scripts/             Certwarden post-issuance scripts
-#   /etc/ssl/<domain>/                   TLS material (cert+key per domain)
-#   /var/log/nginx/                      nginx logs (read by CrowdSec)
-#   /var/lib/crowdsec/                   CrowdSec state (SQLite DB)
-#   /var/lib/crowdsec-web-ui/            CrowdSec web UI state (separate!)
-#   /var/lib/certwarden/                 Certwarden state (DB, ACME account keys)
-#   /var/www/                            served static content, ACME webroot
+#   HOST (absolute)                       CONTAINER
+#   /etc/nginx/                       ->  /etc/nginx           [nginx-ui]
+#   /etc/crowdsec/                    ->  /etc/crowdsec        [crowdsec]
+#   /etc/ssl/<domain>/                ->  /etc/ssl/<domain>/   [nginx-ui RO, certwarden RW]
+#   /var/log/nginx/                   ->  /var/log/nginx       [nginx-ui RW, crowdsec RO]
 #
-# Setup (run once on the host):
-#   sudo cp -r etc/. /etc/                     # seed configs from this repo
-#   sudo mkdir -p /var/log/nginx /var/www \
-#                 /var/lib/crowdsec \
-#                 /var/lib/crowdsec-web-ui \
-#                 /var/lib/certwarden
+#   HOST (relative to this file)          CONTAINER
+#   ./nginx_ui_data/                  ->  /etc/nginx-ui        [nginx-ui]
+#   ./crowdsec_data/                  ->  /var/lib/crowdsec    [crowdsec]
+#   ./crowdsec_web_ui_data/           ->  /app/data            [crowdsec-web-ui]  (separate from crowdsec_data)
+#   ./certwarden_data/                ->  /app/data            [certwarden]
+#   ./certwarden_scripts/             ->  /scripts             [certwarden, ro]
+#   ./www/                            ->  /var/www             [nginx-ui]
+#   ./nginx_crontab                   ->  /etc/cron.d/nginx-ui.crontab  [nginx-ui]
+#
+# First-time setup:
+#   sudo cp -rn etc/. /etc/                         # seed configs
+#   sudo mkdir -p /var/log/nginx                    # logs dir
 #   cp .env.example .env  &&  $EDITOR .env
-#
 #   docker compose up -d crowdsec
 #   docker exec crowdsec cscli bouncers add nginx-bouncer   # -> .env
-#   docker exec crowdsec cscli bouncers add firewall-bouncer # -> /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+#   docker exec crowdsec cscli bouncers add firewall-bouncer # -> /etc/crowdsec/bouncers/...
 #   docker compose up -d
 #
-# Heads up: /etc/ssl is bind-mounted wholesale. This requires the host to
-# have the `ca-certificates` package installed (it almost always does) so
-# the container can still verify outbound TLS via /etc/ssl/certs/ca-certificates.crt.
+# Relative state dirs (./*_data/, ./www/) are auto-created by Docker on
+# first start. /etc/ssl/<domain>/ is owned by Certwarden once you issue
+# your first cert through its UI.
+#
+# Heads up: /etc/ssl is bind-mounted wholesale. The host must have the
+# `ca-certificates` package installed (standard) so the containers still
+# trust outbound TLS via /etc/ssl/certs/ca-certificates.crt.
 
 services:
 
@@ -49,8 +53,7 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - RELOAD_API_KEY=${RELOAD_API_KEY:?RELOAD_API_KEY must be set in .env}
-      # supercronic reads this file. Lives inside the /etc/nginx-ui mount.
-      - CRONTAB_FILE=/etc/nginx-ui/crontab
+      - CRONTAB_FILE=/etc/cron.d/nginx-ui.crontab
       # CrowdSec lua bouncer — see render-bouncer-conf.sh for every CROWDSEC_*
       - CROWDSEC_BOUNCER_ENABLED=true
       - CROWDSEC_LAPI_URL=http://crowdsec:8080
@@ -63,14 +66,15 @@ services:
       - CROWDSEC_APPSEC_DROP_UNREADABLE_BODY=true
     volumes:
       - /etc/nginx:/etc/nginx
-      - /etc/nginx-ui:/etc/nginx-ui
       - /etc/ssl:/etc/ssl:ro
       - /var/log/nginx:/var/log/nginx
-      - /var/www:/var/www
-      # Optional: custom ban/captcha pages. The image ships defaults; uncomment
-      # to override (file must exist on host).
-      # - /etc/nginx-ui/bouncer-templates/ban.html:/var/lib/crowdsec/lua/templates/ban.html:ro
-      # - /etc/nginx-ui/bouncer-templates/captcha.html:/var/lib/crowdsec/lua/templates/captcha.html:ro
+      - ./nginx_ui_data:/etc/nginx-ui
+      - ./www:/var/www
+      - ./nginx_crontab:/etc/cron.d/nginx-ui.crontab:ro
+      # Optional: custom ban/captcha pages. Drop your own HTML files next to
+      # this compose file and uncomment to override the image defaults.
+      # - ./bouncer_templates/ban.html:/var/lib/crowdsec/lua/templates/ban.html:ro
+      # - ./bouncer_templates/captcha.html:/var/lib/crowdsec/lua/templates/captcha.html:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9010/health"]
       interval: 30s
@@ -96,8 +100,8 @@ services:
       - "4065:4065"
       - "4070:4070"
     volumes:
-      - /var/lib/certwarden:/app/data
-      - /etc/certwarden/scripts:/scripts:ro
+      - ./certwarden_data:/app/data
+      - ./certwarden_scripts:/scripts:ro
       - /etc/ssl:/etc/ssl       # writes /etc/ssl/<domain>/ on host
 
   crowdsec:
@@ -117,7 +121,7 @@ services:
       - "7422"   # AppSec — compose-network only
     volumes:
       - /etc/crowdsec:/etc/crowdsec
-      - /var/lib/crowdsec:/var/lib/crowdsec
+      - ./crowdsec_data:/var/lib/crowdsec
       - /var/log/nginx:/var/log/nginx:ro
     healthcheck:
       test: ["CMD", "cscli", "lapi", "status"]
@@ -158,8 +162,8 @@ services:
       - CROWDSEC_ALERT_INCLUDE_CAPI=true
       - CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY=true
     volumes:
-      # Web UI's own state (NOT shared with CrowdSec's LAPI DB).
-      - /var/lib/crowdsec-web-ui:/app/data
+      # Web UI's own state (separate from CrowdSec's LAPI DB above).
+      - ./crowdsec_web_ui_data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
