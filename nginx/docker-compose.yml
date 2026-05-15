@@ -30,6 +30,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "127.0.0.1:9113:9113"   # VTS HTML dashboard (/status) — loopback only
     volumes:
       - /etc/nginx:/etc/nginx
       - /var/log/nginx:/var/log/nginx

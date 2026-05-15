@@ -17,7 +17,7 @@ Automated Docker image builder. Builds and publishes images to GHCR on a daily s
 To add a new image, just create a new folder under `postgres/` with a `Dockerfile` — it will be picked up automatically on the next run.
 
 ## nginx
-[`uozi/nginx-ui`](https://hub.docker.com/r/uozi/nginx-ui) with two dynamic modules added to its stock nginx: Debian's lua module (so the [CrowdSec lua bouncer](https://github.com/crowdsecurity/cs-nginx-bouncer) runs) and a compiled [nginx-module-vts](https://github.com/vozlt/nginx-module-vts) (Prometheus traffic metrics). No OpenResty — its apt repo lags Debian releases by many months. Published to Docker Hub as `buco7854/nginx`. See [`nginx/`](./nginx) for the Dockerfile, image-specific README, and a ready-to-run `docker-compose.yml` (nginx + crowdsec + firewall bouncer + web UI + prometheus + grafana + certwarden).
+[`uozi/nginx-ui`](https://hub.docker.com/r/uozi/nginx-ui) with two dynamic modules added to its stock nginx: Debian's lua module (so the [CrowdSec lua bouncer](https://github.com/crowdsecurity/cs-nginx-bouncer) runs) and a compiled [nginx-module-vts](https://github.com/vozlt/nginx-module-vts) serving a custom HTML traffic dashboard (no Prometheus output). No OpenResty — its apt repo lags Debian releases by many months. Published to Docker Hub as `buco7854/nginx`. See [`nginx/`](./nginx) for the Dockerfile, image-specific README, and a ready-to-run `docker-compose.yml` (nginx + crowdsec + firewall bouncer + web UI + prometheus/grafana for CrowdSec + certwarden).
 
 ## Usage
 ```bash

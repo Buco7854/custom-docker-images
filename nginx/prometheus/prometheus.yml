@@ -2,10 +2,8 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: nginx
-    static_configs:
-      - targets: ['nginx:9113']
-
+  # nginx traffic stats are NOT scraped here — VTS serves a custom HTML
+  # dashboard at nginx:9113/status, not Prometheus format.
   - job_name: crowdsec
     static_configs:
       - targets: ['crowdsec:6060']

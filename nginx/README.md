@@ -2,11 +2,12 @@
 
 `buco7854/nginx` is `uozi/nginx-ui:latest` with two dynamic modules added
 to the stock nginx it ships: Debian's **lua module** (so the CrowdSec Lua
-bouncer can run) and a compiled **nginx-module-vts** (traffic metrics in
-Prometheus format). **No OpenResty** — its apt repo lags Debian releases
-by many months, which is unworkable. This repo also contains a
-ready-to-run `docker-compose.yml` wiring nginx with CrowdSec (engine +
-firewall bouncer + web UI), Prometheus, Grafana, and Certwarden.
+bouncer can run) and a compiled **nginx-module-vts** that serves a custom
+interactive **HTML dashboard** (no Prometheus output). **No OpenResty** —
+its apt repo lags Debian releases by many months, which is unworkable.
+This repo also contains a ready-to-run `docker-compose.yml` wiring nginx
+with CrowdSec (engine + firewall bouncer + web UI), Prometheus/Grafana
+(CrowdSec metrics only), and Certwarden.
 
 ## Image
 
@@ -25,13 +26,14 @@ path, config path, pid path) and its default reload/test/restart
 commands all just work — there is nothing to override in `app.ini`.
 
 Two modules are added as `.so` files baked at `/usr/lib/nginx/modules`
-(outside `/etc/nginx`, so a host bind mount can't hide them; the seed
-`nginx.conf` carries the three `load_module` lines):
+(outside `/etc/nginx`, so a host bind mount can't hide them; the
+`load_module` lines live in the `modules-enabled/` drop-in — see
+config layout below):
 
 | Module | Where it comes from | Update story |
 |---|---|---|
 | `ndk` + `lua` | Debian `libnginx-mod-http-ndk` / `libnginx-mod-http-lua`, fetched from the **same base image** so the release always matches the running nginx. Built `--with-compat` (the ABI contract that lets the module load into nginx.org's nginx). | **Auto-patched by Debian** on every weekly rebuild. |
-| `vts` | Compiled from source against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, in a builder stage on the same base. | Recompiled against whatever nginx ships, **every rebuild** — tracks nginx automatically. |
+| `vts` | Compiled from **latest** upstream (default branch) against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, on the same base. The custom dashboard is baked in via VTS's `tplToDefine.sh`. | Tracks nginx automatically every rebuild; VTS upstream fixes nginx-compat on that branch first. Pin a one-off with `--build-arg VTS_REF=<tag>`. |
 | CrowdSec bouncer + `lua-resty-*` | Official `crowdsec-nginx-bouncer` `.deb` (GPG-verified) + pinned luarocks deps. | **Pinned** for reproducibility; bump deliberately. |
 
 The design principle is **fail-loud-at-build, never-silent-in-prod**: a
@@ -41,6 +43,30 @@ lua deps. If a future upstream ever breaks `--with-compat` or a path, the
 ships broken. There is no routine maintenance: Debian patches nginx/lua,
 VTS recompiles itself against the current nginx, and the pinned bits only
 move when you choose to bump an `ARG`.
+
+### Config layout — drop-ins, bring your own /etc/nginx
+
+The image bakes nothing into `/etc/nginx` (a host bind mount would hide
+it anyway). All integration is **drop-in files** you copy into your
+`/etc/nginx`, so you can keep your existing Debian config and just add:
+
+- `modules-enabled/00-buco-modules.conf` — the three `load_module`
+  lines. Included at the **main** context via
+  `include /etc/nginx/modules-enabled/*.conf;` (Debian's stock
+  `nginx.conf` already has this line; `load_module` is *only* valid in
+  the main context, never inside `http{}`, so it cannot be a normal
+  `conf.d` file).
+- `conf.d/05-realip.conf` — real client IP behind Docker NAT.
+- `conf.d/10-crowdsec.conf` — resolver + includes the CrowdSec bouncer
+  snippet shipped in the image at `/usr/share` (bind-mount-safe).
+- `conf.d/20-vts.conf` — VTS zone + the `:9113/status` HTML dashboard
+  server.
+- `conf.d/06-ratelimit.conf` — rate-limit zones.
+
+These ride your existing `include /etc/nginx/conf.d/*.conf;`. If you
+bring your own `nginx.conf`, the only requirement is those two stock
+includes (`modules-enabled/*` at main, `conf.d/*` in `http{}`). The
+seed `nginx.conf` here is just a plain skeleton for a from-scratch user.
 
 ### Service monitoring & control
 
@@ -63,14 +89,16 @@ real binary.
 ┌─────────────────────────────────────────────────────┐
 │  nginx (buco7854/nginx)                             │
 │  stock nginx + lua module (CrowdSec bouncer,        │
-│  incl. AppSec) + VTS metrics + nginx-ui             │
+│  incl. AppSec) + VTS HTML dashboard + nginx-ui      │
 └──┬───────────────┬──────────────┬───────────────────┘
-   │ access/error  │ AppSec WAF   │ /metrics :9113
-   ▼               ▼              ▼
-┌─────────────────────────┐  ┌────────────┐
-│ crowdsec  LAPI  :8080   │  │ prometheus │──── grafana :3001
-│           AppSec :7422  │  └────────────┘
-└──┬──────────────┬───────┘
+   │ access/error  │ AppSec WAF   │ VTS dashboard
+   ▼               ▼              │ :9113/status (HTML, loopback)
+┌─────────────────────────┐      ▼
+│ crowdsec  LAPI  :8080   │  ┌────────────┐
+│           AppSec :7422  │  │ prometheus │──── grafana :3001
+│           metrics:6060 ─┼─▶│ (crowdsec  │     (CrowdSec
+└──┬──────────────┬───────┘  │  only)     │      dashboards)
+   │              │          └────────────┘
    │ decisions    │ alerts
    ▼              ▼
 ┌─────────────┐  ┌────────────────┐
@@ -149,8 +177,10 @@ dirs next to `docker-compose.yml` — all gitignored.
    (Run with the same values as your `.env`, or export them first.)
 6. **Open the UIs.**
    - nginx-ui — http://localhost (served on port 80 via the proxy itself)
-   - Grafana — http://localhost:3001 (import dashboard ID `2949`,
-     "Nginx VTS Stats", which matches the VTS Prometheus metrics)
+   - VTS traffic dashboard — http://localhost:9113/status (the custom
+     HTML dashboard baked into the module)
+   - Grafana — http://localhost:3001 (CrowdSec dashboards only; nginx
+     traffic is the VTS dashboard above, not Prometheus)
    - CrowdSec web UI — http://localhost:9321
 
 ## Certwarden integration
@@ -200,10 +230,15 @@ The Debian layout is preserved — `conf.d/`, `sites-available/`,
 `sites-enabled/`, `server-conf.d/`, and `snippets/` all work exactly as
 they did on a bare-metal Debian host. To migrate:
 
-- **Drop your existing tree into `/etc/nginx/`.** Don't merge —
-  literally copy the directory. Keep the three `load_module` lines from
-  the seed `nginx.conf` at the very top (ndk → lua → vts); the bouncer
-  and metrics depend on them. Don't add your own lua/vts `load_module`.
+- **Keep your own `nginx.conf`.** You don't need this repo's seed one.
+  Just ensure it has `include /etc/nginx/modules-enabled/*.conf;` at the
+  **main** context (Debian's stock `nginx.conf` already does) and
+  `include /etc/nginx/conf.d/*.conf;` inside `http{}` (standard).
+- **Copy the drop-ins into your `/etc/nginx/`:** this repo's
+  `conf/modules-enabled/00-buco-modules.conf` and the `conf/conf.d/*`
+  files (`05-realip`, `10-crowdsec`, `20-vts`, `06-ratelimit`). That's
+  the entire integration — no edits to your `nginx.conf` body.
+- **Don't add your own lua/vts `load_module`** — the drop-in handles it.
 - **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
 - **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
   change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
@@ -253,12 +288,17 @@ in the repo root.
 ```
 nginx/
 ├── Dockerfile                # buco7854/nginx image (stock nginx + lua + vts)
+├── status.html               # custom VTS dashboard, baked into the module
 ├── app.ini                   # minimal nginx-ui config baked into the image
 ├── docker-compose.yml        # full homelab stack
 ├── .env.example              # template — copy to .env (gitignored)
-├── conf/                     # seed config — copy to /etc/nginx/ on the host
-│   ├── nginx.conf            # carries the 3 load_module lines + VTS /metrics
+├── conf/                     # drop-ins — copy into /etc/nginx/ on the host
+│   ├── nginx.conf            # plain skeleton (only for a from-scratch user)
 │   ├── mime.types
+│   ├── modules-enabled/00-buco-modules.conf   # the 3 load_module lines (main ctx)
+│   ├── conf.d/05-realip.conf
+│   ├── conf.d/10-crowdsec.conf                 # resolver + bouncer snippet
+│   ├── conf.d/20-vts.conf                      # VTS zone + :9113/status HTML
 │   ├── conf.d/06-ratelimit.conf
 │   ├── snippets/{ratelimit.conf, security-txt.conf}
 │   └── server-conf.d/.gitkeep

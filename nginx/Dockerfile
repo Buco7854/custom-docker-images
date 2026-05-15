@@ -96,23 +96,40 @@ RUN set -eux; \
 ############################################################
 FROM uozi/nginx-ui:${NGINX_UI_TAG} AS builder
 
-# Pinned for reproducibility. Bump only if a newer nginx ever needs it
-# (the final-stage build guard will fail loudly if VTS is incompatible).
-ARG VTS_VERSION=v0.2.2
+# VTS is intentionally NOT pinned — we track its default branch so it
+# stays compatible with whatever nginx version uozi ships (VTS upstream
+# fixes nginx-compat there first). The final-stage `nginx -t` guard
+# fails the build loudly if a given VTS/nginx pair is ever incompatible,
+# so "latest" never silently ships broken. Override with --build-arg
+# VTS_REF=<tag> for a one-off reproducible build.
+ARG VTS_REF=
+
+# Custom VTS dashboard, baked into the module at compile time via VTS's
+# own tplToDefine.sh. This is the ONLY status output — no Prometheus
+# format is exposed.
+COPY status.html /tmp/status.html
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl build-essential libpcre2-dev libssl-dev zlib1g-dev; \
+        ca-certificates curl git build-essential libpcre2-dev libssl-dev zlib1g-dev; \
     NGX_VER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
-    echo "compiling VTS ${VTS_VERSION} against nginx ${NGX_VER}"; \
     cd /tmp; \
     curl -fsSL "https://nginx.org/download/nginx-${NGX_VER}.tar.gz" | tar xz; \
-    curl -fsSL "https://github.com/vozlt/nginx-module-vts/archive/refs/tags/${VTS_VERSION}.tar.gz" \
-        | tar xz; \
+    if [ -n "${VTS_REF}" ]; then \
+        git clone --depth 1 --branch "${VTS_REF}" \
+            https://github.com/vozlt/nginx-module-vts.git /tmp/vts; \
+    else \
+        git clone --depth 1 \
+            https://github.com/vozlt/nginx-module-vts.git /tmp/vts; \
+    fi; \
+    echo "compiling VTS ($(git -C /tmp/vts rev-parse --short HEAD)) against nginx ${NGX_VER}"; \
+    # Bake the custom HTML dashboard into the module.
+    chmod +x /tmp/vts/util/tplToDefine.sh; \
+    /tmp/vts/util/tplToDefine.sh /tmp/status.html \
+        > /tmp/vts/src/ngx_http_vhost_traffic_status_module_html.h; \
     cd "nginx-${NGX_VER}"; \
-    ./configure --with-compat \
-        --add-dynamic-module="/tmp/nginx-module-vts-${VTS_VERSION#v}"; \
+    ./configure --with-compat --add-dynamic-module=/tmp/vts; \
     make -j"$(nproc)" modules; \
     mkdir -p /assets; \
     cp objs/ngx_http_vhost_traffic_status_module.so /assets/
