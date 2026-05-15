@@ -171,7 +171,7 @@ RUN set -eux; \
 
 # CrowdSec bouncer assets at canonical paths. The http-level snippet is
 # stashed under /usr/share (NOT /etc/nginx) so a user bind mount can't
-# hide it; conf.d/01-crowdsec.conf includes it from there.
+# hide it; conf.d/10-crowdsec.conf includes it from there.
 COPY --from=assets /assets/bouncer /tmp/bouncer
 RUN set -eux; \
     mkdir -p /usr/lib/crowdsec/lua /var/lib/crowdsec/lua/templates \
@@ -192,6 +192,36 @@ COPY --from=assets /assets/luatree/share/lua/5.1/ /usr/local/share/lua/5.1/
 COPY --from=assets /assets/luatree/lib/lua/5.1/   /usr/local/lib/lua/5.1/
 
 COPY app.ini /etc/nginx-ui/app.ini
+
+# Seed our drop-ins into the base image's config TEMPLATE
+# (/usr/local/etc/nginx). The base already ships an `init-config` s6
+# oneshot that runs before nginx and does:
+#     [ -z "$(ls -A /etc/nginx)" ] && cp -rp /usr/local/etc/nginx/* /etc/nginx/
+# i.e. it seeds /etc/nginx from the template ONLY when /etc/nginx is
+# empty, and leaves an existing config completely untouched. By enriching
+# that same template we inherit exactly that behaviour — no custom
+# entrypoint:
+#   * empty /etc/nginx  -> default nginx + nginx-ui proxy + CrowdSec
+#                          bouncer + VTS + real-IP + rate-limit, working
+#                          out of the box.
+#   * existing /etc/nginx (your bind-mounted config) -> NOT touched.
+# The .so files live at /usr/lib/nginx/modules (outside /etc/nginx), so
+# they're present regardless of seeding; the template just needs the
+# load_module include, which the stock nginx.conf lacks.
+COPY conf/modules-enabled/   /usr/local/etc/nginx/modules-enabled/
+COPY conf/conf.d/05-realip.conf    /usr/local/etc/nginx/conf.d/05-realip.conf
+COPY conf/conf.d/10-crowdsec.conf  /usr/local/etc/nginx/conf.d/10-crowdsec.conf
+COPY conf/conf.d/20-vts.conf       /usr/local/etc/nginx/conf.d/20-vts.conf
+COPY conf/conf.d/06-ratelimit.conf /usr/local/etc/nginx/conf.d/06-ratelimit.conf
+COPY conf/snippets/          /usr/local/etc/nginx/snippets/
+COPY conf/server-conf.d/     /usr/local/etc/nginx/server-conf.d/
+RUN set -eux; \
+    test -f /usr/local/etc/nginx/nginx.conf; \
+    if ! grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf; then \
+        sed -i '1i include /etc/nginx/modules-enabled/*.conf;' \
+            /usr/local/etc/nginx/nginx.conf; \
+    fi; \
+    grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf
 
 # Build-time guard: load all three modules + require the lua deps + open
 # a VTS zone. Any --with-compat / lua-path / VTS breakage fails HERE.

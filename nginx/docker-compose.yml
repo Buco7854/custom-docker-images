@@ -16,10 +16,12 @@
 #   /var/log/nginx       access/error logs (RW for nginx, RO for crowdsec)
 #   /etc/ssl/domains     SSL certs (certwarden writes via /certs, nginx reads)
 #
-# Seed configs from this repo (one-time):
-#   sudo cp -rn nginx/conf/. /etc/nginx/
-#   sudo mkdir -p /var/log/nginx /etc/ssl/domains
+# First run:
+#   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
 #   cp .env.example .env  &&  $EDITOR .env
+# Leave /etc/nginx EMPTY and the container seeds it (default nginx +
+# nginx-ui + CrowdSec + VTS) on first start. If /etc/nginx already has a
+# config it is left untouched (add the drop-ins by hand — see README).
 
 services:
 

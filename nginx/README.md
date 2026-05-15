@@ -44,29 +44,47 @@ ships broken. There is no routine maintenance: Debian patches nginx/lua,
 VTS recompiles itself against the current nginx, and the pinned bits only
 move when you choose to bump an `ARG`.
 
-### Config layout — drop-ins, bring your own /etc/nginx
+### Config layout — seed-if-empty, never clobber
 
-The image bakes nothing into `/etc/nginx` (a host bind mount would hide
-it anyway). All integration is **drop-in files** you copy into your
-`/etc/nginx`, so you can keep your existing Debian config and just add:
+The image behaves like a **default nginx-ui install that also ships the
+CrowdSec + VTS integration**. It inherits the base image's `init-config`
+behaviour exactly:
+
+- **Empty `/etc/nginx` on first start** → it's seeded with the default
+  nginx config, the nginx-ui `:80→:9000` proxy, **and** our drop-ins
+  (CrowdSec bouncer, VTS dashboard, real-IP, rate-limit, the
+  `load_module` lines). Works out of the box, nothing to copy.
+- **Existing `/etc/nginx`** (your bind-mounted config) → **nothing is
+  touched.** Your config is used verbatim.
+
+This works because we enrich the base's config *template*
+(`/usr/local/etc/nginx`); the base's `init-config` s6 oneshot runs
+before nginx and only does
+`[ -z "$(ls -A /etc/nginx)" ] && cp -rp /usr/local/etc/nginx/* /etc/nginx/`.
+No custom entrypoint, no clobbering.
+
+The pieces that get seeded (and that you copy in by hand if you bring an
+existing config and want the integration):
 
 - `modules-enabled/00-buco-modules.conf` — the three `load_module`
-  lines. Included at the **main** context via
-  `include /etc/nginx/modules-enabled/*.conf;` (Debian's stock
-  `nginx.conf` already has this line; `load_module` is *only* valid in
-  the main context, never inside `http{}`, so it cannot be a normal
-  `conf.d` file).
+  lines. Loaded at the **main** context; the seeded `nginx.conf` gets an
+  `include /etc/nginx/modules-enabled/*.conf;` line added (stock
+  nginx-ui's `nginx.conf` lacks it). `load_module` is *only* valid in
+  the main context, never inside `http{}`, so it can't be a `conf.d`
+  file. The `.so` files live at `/usr/lib/nginx/modules` (outside
+  `/etc/nginx`), so they're always present regardless of seeding.
 - `conf.d/05-realip.conf` — real client IP behind Docker NAT.
 - `conf.d/10-crowdsec.conf` — resolver + includes the CrowdSec bouncer
   snippet shipped in the image at `/usr/share` (bind-mount-safe).
-- `conf.d/20-vts.conf` — VTS zone + the `:9113/status` HTML dashboard
-  server.
+- `conf.d/20-vts.conf` — VTS zone + the `:9113/status` HTML dashboard.
 - `conf.d/06-ratelimit.conf` — rate-limit zones.
 
-These ride your existing `include /etc/nginx/conf.d/*.conf;`. If you
-bring your own `nginx.conf`, the only requirement is those two stock
-includes (`modules-enabled/*` at main, `conf.d/*` in `http{}`). The
-seed `nginx.conf` here is just a plain skeleton for a from-scratch user.
+To add the integration to an **already-populated** `/etc/nginx`, copy
+this repo's `conf/modules-enabled/*` and `conf/conf.d/{05,10,20,06}*`
+into it and ensure your `nginx.conf` has the two stock includes
+(`modules-enabled/*` at main — Debian's default already does;
+`conf.d/*` in `http{}`). The repo's `conf/nginx.conf` is just a plain
+reference skeleton.
 
 ### Service monitoring & control
 
@@ -146,14 +164,16 @@ dirs next to `docker-compose.yml` — all gitignored.
    cp .env.example .env
    $EDITOR .env                # .env is gitignored — put real secrets here
    ```
-2. **Seed the host directories from the repo.**
+2. **Create the host dirs.**
    ```bash
-   sudo cp -rn conf/. /etc/nginx/
-   sudo mkdir -p /var/log/nginx /etc/ssl/domains
+   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
    ```
-   Drop your existing Debian-style tree (`sites-available/`,
-   `sites-enabled/`, plus any custom files) into `/etc/nginx/` —
-   structure is preserved 1:1.
+   Leave `/etc/nginx` **empty** to let the container seed it (default
+   nginx + nginx-ui + CrowdSec + VTS) on first start. Or drop your
+   existing Debian-style tree (`nginx.conf`, `sites-enabled/`, …) into
+   `/etc/nginx` — if it's non-empty the container won't touch it; then
+   add the integration by copying `conf/modules-enabled/*` and
+   `conf/conf.d/{05,10,20,06}*` into it (see "Config layout").
 3. **Match the API keys in the bouncer config files.**
    ```bash
    $EDITOR crowdsec/bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
