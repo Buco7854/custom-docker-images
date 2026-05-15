@@ -2,8 +2,9 @@
 # Certwarden post-issuance hook.
 #
 # Run by Certwarden after it issues / renews a certificate. Writes the
-# cert pair to /etc/ssl/domains/<CERTIFICATE_NAME>/ and calls nginx-ui's
-# reload API to make nginx pick it up.
+# cert pair to /certs/<CERTIFICATE_NAME>/ (the container's view; the host
+# dir /etc/ssl/domains is bind-mounted there and read by nginx at
+# /etc/ssl/domains) and calls nginx-ui's reload API to pick it up.
 #
 # Required env vars (passed in by Certwarden + .env):
 #   CERTIFICATE_PEM     PEM-encoded fullchain
@@ -14,7 +15,8 @@
 # Optional:
 #   NGINX_UI_HOST       default: nginx (compose service name)
 #   NGINX_UI_PORT       default: 80   (nginx-ui served from the proxy itself)
-#   CERT_ROOT           default: /etc/ssl/domains
+#   CERT_ROOT           default: /certs (certwarden's mount of the host's
+#                        /etc/ssl/domains)
 set -euo pipefail
 
 log() {
@@ -33,7 +35,7 @@ die() {
 
 NGINX_UI_HOST="${NGINX_UI_HOST:-nginx}"
 NGINX_UI_PORT="${NGINX_UI_PORT:-80}"
-CERT_ROOT="${CERT_ROOT:-/etc/ssl/domains}"
+CERT_ROOT="${CERT_ROOT:-/certs}"
 
 dest_dir="${CERT_ROOT}/${CERTIFICATE_NAME}"
 log "writing cert pair to ${dest_dir}/"

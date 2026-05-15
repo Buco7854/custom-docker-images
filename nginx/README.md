@@ -51,22 +51,26 @@ argv left-to-right and the last `-c` wins, so a caller passing its own
 └──┬──────────────┬───────┘
    │ decisions    │ alerts
    ▼              ▼
-┌─────────────┐  ┌──────────────┐
-│ firewall    │  │ crowdsec-ui  │
-│ bouncer     │  │ :3000        │
-│ (iptables)  │  └──────────────┘
-└─────────────┘
+┌─────────────┐  ┌────────────────┐
+│ firewall    │  │ crowdsec-web-ui│
+│ bouncer     │  │ :9321 (machine │
+│ (iptables)  │  │  creds → LAPI) │
+└─────────────┘  └────────────────┘
 
-certwarden :4055 ──writes certs──▶ /etc/ssl/domains/
-                 ──POST reload──▶  nginx /api/nginx/reload
+certwarden :4055 ──writes /certs/──▶ host /etc/ssl/domains/
+                 ──POST reload────▶  nginx /api/nginx/reload
 ```
 
 Everything except 80/443 binds to `127.0.0.1` only — nothing on the LAN
 can talk to LAPI, Grafana, the CrowdSec UI, Prometheus, or Certwarden's
-admin port. All services share the `proxy_net` bridge network and
-resolve each other by service name — except the firewall bouncer, which
-runs with `network_mode: host` so it can rewrite iptables, and reaches
-LAPI via the loopback-published `127.0.0.1:8080`.
+ports. All services share the `proxy_net` bridge network and resolve
+each other by service name — except the firewall bouncer, which runs
+with `network_mode: host` so it can rewrite iptables, and reaches LAPI
+via the loopback-published `127.0.0.1:8080`.
+
+The CrowdSec web UI authenticates to LAPI with **machine credentials**
+(`CROWDSEC_UI_USER` / `CROWDSEC_UI_PASSWORD`), not a bouncer API key, so
+that machine has to be registered once (see setup step 5).
 
 ### Host paths
 
@@ -77,10 +81,11 @@ from the host:
 |--------------------|---------------------|------------------------------------|
 | `/etc/nginx`       | `/etc/nginx`        | you — drop your config here        |
 | `/var/log/nginx`   | `/var/log/nginx`    | nginx writes, crowdsec reads (RO)  |
-| `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes, nginx reads (RO)|
+| `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes (via its `/certs` mount), nginx reads (RO)|
 
-Everything else (nginx-ui state, www files, crowdsec data, prometheus
-volume, etc.) stays in relative dirs next to `docker-compose.yml`.
+Everything else (nginx-ui state, www files, crowdsec data, web-ui data,
+prometheus/grafana data, certwarden data) stays in relative bind-mount
+dirs next to `docker-compose.yml` — all gitignored.
 
 ## First-time setup
 
@@ -89,7 +94,7 @@ volume, etc.) stays in relative dirs next to `docker-compose.yml`.
    git clone https://github.com/buco7854/custom-docker-images
    cd custom-docker-images/nginx
    cp .env.example .env
-   $EDITOR .env                # fills in CROWDSEC_*_API_KEY, NGINX_UI_API_KEY, etc.
+   $EDITOR .env                # .env is gitignored — put real secrets here
    ```
 2. **Seed the host directories from the repo.**
    ```bash
@@ -110,11 +115,20 @@ volume, etc.) stays in relative dirs next to `docker-compose.yml`.
    docker compose up -d
    ```
    The `BOUNCER_KEY_*` env vars on the CrowdSec service auto-register
-   all three bouncer keys on first start.
-5. **Open the UIs.**
+   both bouncer keys on first start.
+5. **Register the web-UI machine account.** The CrowdSec web UI uses
+   machine credentials (not a bouncer key), and the crowdsec image does
+   not auto-register machines:
+   ```bash
+   docker compose exec crowdsec \
+     cscli machines add "$CROWDSEC_UI_USER" --password "$CROWDSEC_UI_PASSWORD"
+   docker compose restart crowdsec-web-ui
+   ```
+   (Run with the same values as your `.env`, or export them first.)
+6. **Open the UIs.**
    - nginx-ui — http://localhost (served on port 80 via the proxy itself)
    - Grafana — http://localhost:3001 (import dashboard ID `10442`)
-   - CrowdSec web UI — http://localhost:3000
+   - CrowdSec web UI — http://localhost:9321
 
 ## Certwarden integration
 
@@ -133,10 +147,11 @@ The script expects these env vars (which Certwarden passes, plus
 | `NGINX_UI_API_KEY`| `.env`                                |
 
 The hook writes `fullchain.pem` and `privkey.pem` under
-`/etc/ssl/domains/<CERTIFICATE_NAME>/` (which is `/etc/ssl/domains/` on
-the host, bind-mounted into nginx read-only) and then `POST`s
+`/certs/<CERTIFICATE_NAME>/` inside the certwarden container. That
+`/certs` mount is the host's `/etc/ssl/domains`, which nginx reads
+back read-only at `/etc/ssl/domains`. It then `POST`s
 `http://nginx/api/nginx/reload` with the `X-API-Key` header to trigger
-`nginx -s reload`.
+`nginx -s reload`. (Override `CERT_ROOT` if you remap that mount.)
 
 ## CrowdSec whitelists
 
@@ -216,7 +231,7 @@ nginx/
 ├── app.ini                   # default nginx-ui config baked into the image
 ├── nginx-wrapper.sh          # /usr/sbin/nginx wrapper that adds -c /etc/nginx/nginx.conf
 ├── docker-compose.yml        # full homelab stack
-├── .env.example
+├── .env.example              # template — copy to .env (gitignored)
 ├── conf/                     # seed config — copy to /etc/nginx/ on the host
 │   ├── nginx.conf
 │   ├── conf.d/{01-crowdsec.conf, 06-ratelimit.conf}
