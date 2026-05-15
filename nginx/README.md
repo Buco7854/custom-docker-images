@@ -23,6 +23,14 @@ Debian release codename is detected from `/etc/os-release` at build time —
 nothing is hardcoded, so the image follows whatever nginx-ui's base
 becomes.
 
+OpenResty's compiled-in prefix is `/usr/local/openresty/nginx/`, so by
+default it reads `/usr/local/openresty/nginx/conf/nginx.conf`. The image
+replaces that file with a symlink to `/etc/nginx/nginx.conf`, so
+OpenResty reads the Debian-style config that nginx-ui manages and that
+the compose stack bind-mounts. The rest of OpenResty's `conf/` dir
+(`mime.types`, `fastcgi.conf`, etc.) is left in place — `nginx.conf`
+references those defaults by absolute path.
+
 ## Stack overview
 
 ```
