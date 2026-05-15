@@ -3,9 +3,10 @@
 #   crowdsec                   — LAPI reading nginx logs + AppSec (WAF)
 #   crowdsec-firewall-bouncer  — applies LAPI decisions to host iptables
 #   crowdsec-web-ui            — web UI for alerts/decisions
-#   prometheus                 — scrapes nginx :9113 + crowdsec :6060
-#   grafana                    — dashboards on top of prometheus
 #   certwarden                 — Let's Encrypt cert manager
+#
+# nginx traffic is the VTS HTML dashboard at :9113/status; CrowdSec has
+# its own web UI — there is no Prometheus/Grafana.
 #
 # Non-web ports bind to 127.0.0.1 only so nothing except 80/443 leaks
 # onto the LAN. Services share `proxy_net` (except the firewall bouncer,
@@ -110,36 +111,6 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - crowdsec
-    networks:
-      - proxy_net
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    restart: unless-stopped
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/data:/prometheus
-    ports:
-      - "127.0.0.1:9090:9090"
-    networks:
-      - proxy_net
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    restart: unless-stopped
-    volumes:
-      - ./grafana/data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
-      - GF_SERVER_ROOT_URL=http://localhost:3001
-      - TZ=${TZ}
-    ports:
-      - "127.0.0.1:3001:3000"
-    depends_on:
-      - prometheus
     networks:
       - proxy_net
 

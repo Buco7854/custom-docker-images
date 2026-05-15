@@ -18,8 +18,8 @@
 #             a dynamic module against the EXACT nginx version uozi ships
 #             (detected from `nginx -v`), --with-compat, in a builder
 #             stage on the SAME base (identical pcre2/openssl/zlib as
-#             runtime). It exposes Prometheus metrics natively — no lua
-#             needed for metrics.
+#             runtime). Serves the custom HTML dashboard baked in via
+#             VTS's tplToDefine.sh — no lua, no Prometheus.
 #
 # A build-time `nginx -t` that loads all three modules and requires the
 # lua deps is the guard: any upstream break fails the BUILD loudly, it
@@ -46,8 +46,6 @@ ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
 # so the release it targets is irrelevant. Asserted below.
 ARG CROWDSEC_DEBIAN_RELEASE=bookworm
 ARG CS_NGINX_BOUNCER_VERSION=
-ARG LUA_RESTY_HTTP_VERSION=0.17.2-0
-ARG LUA_RESTY_STRING_VERSION=0.16-0
 
 RUN set -eux; \
     apt-get update; \
@@ -77,8 +75,13 @@ RUN set -eux; \
     dpkg-deb -x "$(ls libnginx-mod-http-ndk_*.deb)" /assets/lua; \
     dpkg-deb -x "$(ls crowdsec-nginx-bouncer_*.deb)" /assets/bouncer; \
     \
-    luarocks install lua-resty-http "${LUA_RESTY_HTTP_VERSION}" --tree=/assets/luatree; \
-    luarocks install lua-resty-string "${LUA_RESTY_STRING_VERSION}" --tree=/assets/luatree; \
+    # lua-resty-http (HTTP client the bouncer uses to reach LAPI) and
+    # lua-resty-string (string/crypto helpers): tiny pure-lua libs not in
+    # Debian. Installed latest via luarocks — same as you'd do by hand on
+    # a baremetal plain-nginx install. Unpinned: the build-time `nginx -t`
+    # guard catches any breakage.
+    luarocks install lua-resty-http   --tree=/assets/luatree; \
+    luarocks install lua-resty-string --tree=/assets/luatree; \
     \
     # Guard: bouncer .deb must stay pure lua/config (no ELF binaries).
     if find /assets/bouncer -type f -exec sh -c 'head -c4 "$1"|grep -q ELF' _ {} \; -print | grep -q .; then \
@@ -152,15 +155,18 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends lua-cjson sqlite3 ca-certificates; \
     rm -rf /var/lib/apt/lists/*
 
-# Install lua + ndk (Debian) and vts (compiled) at the modules path
-# discovered from `nginx -V`. These .so files live under /usr/lib/nginx
-# (NOT /etc/nginx), so a host bind mount of /etc/nginx can't hide them;
-# the seed nginx.conf load_module lines point straight here.
+# Install lua + ndk (Debian) and vts (compiled) into /usr/lib/nginx/
+# modules — that's nginx.org's compiled --modules-path on this base, and
+# it's outside /etc/nginx so a host bind mount can't hide them. We assert
+# the detected modules-path matches (fail the build loudly if upstream
+# ever changes it, since the modules-enabled drop-ins hardcode this).
 COPY --from=assets  /assets/lua /tmp/lua
 COPY --from=builder /assets/ngx_http_vhost_traffic_status_module.so /tmp/vts.so
 RUN set -eux; \
-    MODPATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
-    [ -n "$MODPATH" ] || MODPATH=/usr/lib/nginx/modules; \
+    MODPATH=/usr/lib/nginx/modules; \
+    DETECTED="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
+    [ "${DETECTED:-$MODPATH}" = "$MODPATH" ] \
+        || { echo "FATAL: nginx modules-path is $DETECTED, expected $MODPATH" >&2; exit 1; }; \
     mkdir -p "$MODPATH"; \
     install -m644 "$(find /tmp/lua -name ndk_http_module.so -print -quit)" \
         "$MODPATH/ndk_http_module.so"; \
@@ -169,19 +175,23 @@ RUN set -eux; \
     install -m644 /tmp/vts.so "$MODPATH/ngx_http_vhost_traffic_status_module.so"; \
     rm -rf /tmp/lua /tmp/vts.so
 
-# CrowdSec bouncer assets at canonical paths. The http-level snippet is
-# stashed under /usr/share (NOT /etc/nginx) so a user bind mount can't
-# hide it; conf.d/10-crowdsec.conf includes it from there.
+# CrowdSec bouncer assets at the EXACT paths `apt install
+# crowdsec-nginx-bouncer` uses on baremetal: lua at /usr/lib/crowdsec/
+# lua, templates at /var/lib/crowdsec/lua/templates, the bouncer config
+# at /etc/crowdsec/bouncers/, and the nginx snippet straight into
+# conf.d/crowdsec_nginx.conf — placed in the base's config TEMPLATE so
+# it's seeded into /etc/nginx exactly like the .deb would, indistinguish-
+# able from a baremetal install.
 COPY --from=assets /assets/bouncer /tmp/bouncer
 RUN set -eux; \
     mkdir -p /usr/lib/crowdsec/lua /var/lib/crowdsec/lua/templates \
-             /etc/crowdsec/bouncers /usr/share/cs-nginx-bouncer; \
+             /etc/crowdsec/bouncers /usr/local/etc/nginx/conf.d; \
     cp -r "$(dirname "$(find /tmp/bouncer -name crowdsec.lua -print -quit)")/." \
           /usr/lib/crowdsec/lua/; \
     cp -r "$(dirname "$(find /tmp/bouncer -name ban.html -print -quit)")/." \
           /var/lib/crowdsec/lua/templates/; \
     cp "$(find /tmp/bouncer -name crowdsec_nginx.conf -print -quit)" \
-       /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf; \
+       /usr/local/etc/nginx/conf.d/crowdsec_nginx.conf; \
     cp "$(find /tmp/bouncer -name crowdsec-nginx-bouncer.conf -print -quit)" \
        /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
     rm -rf /tmp/bouncer
@@ -208,13 +218,15 @@ COPY app.ini /etc/nginx-ui/app.ini
 # The .so files live at /usr/lib/nginx/modules (outside /etc/nginx), so
 # they're present regardless of seeding; the template just needs the
 # load_module include, which the stock nginx.conf lacks.
-COPY conf/modules-enabled/   /usr/local/etc/nginx/modules-enabled/
-COPY conf/conf.d/05-realip.conf    /usr/local/etc/nginx/conf.d/05-realip.conf
-COPY conf/conf.d/10-crowdsec.conf  /usr/local/etc/nginx/conf.d/10-crowdsec.conf
-COPY conf/conf.d/20-vts.conf       /usr/local/etc/nginx/conf.d/20-vts.conf
-COPY conf/conf.d/06-ratelimit.conf /usr/local/etc/nginx/conf.d/06-ratelimit.conf
-COPY conf/snippets/          /usr/local/etc/nginx/snippets/
-COPY conf/server-conf.d/     /usr/local/etc/nginx/server-conf.d/
+# (conf.d/crowdsec_nginx.conf was already placed into the template by the
+# bouncer step above, exactly as the .deb does on baremetal.)
+COPY conf/modules-enabled/    /usr/local/etc/nginx/modules-enabled/
+COPY conf/conf.d/realip.conf    /usr/local/etc/nginx/conf.d/realip.conf
+COPY conf/conf.d/resolver.conf  /usr/local/etc/nginx/conf.d/resolver.conf
+COPY conf/conf.d/ratelimit.conf /usr/local/etc/nginx/conf.d/ratelimit.conf
+COPY conf/conf.d/vts.conf       /usr/local/etc/nginx/conf.d/vts.conf
+COPY conf/snippets/           /usr/local/etc/nginx/snippets/
+COPY conf/server-conf.d/      /usr/local/etc/nginx/server-conf.d/
 RUN set -eux; \
     test -f /usr/local/etc/nginx/nginx.conf; \
     if ! grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf; then \
@@ -226,8 +238,7 @@ RUN set -eux; \
 # Build-time guard: load all three modules + require the lua deps + open
 # a VTS zone. Any --with-compat / lua-path / VTS breakage fails HERE.
 RUN set -eux; \
-    MODPATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
-    [ -n "$MODPATH" ] || MODPATH=/usr/lib/nginx/modules; \
+    MODPATH=/usr/lib/nginx/modules; \
     { \
       echo "load_module $MODPATH/ndk_http_module.so;"; \
       echo "load_module $MODPATH/ngx_http_lua_module.so;"; \

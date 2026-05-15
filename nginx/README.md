@@ -6,8 +6,9 @@ bouncer can run) and a compiled **nginx-module-vts** that serves a custom
 interactive **HTML dashboard** (no Prometheus output). **No OpenResty** —
 its apt repo lags Debian releases by many months, which is unworkable.
 This repo also contains a ready-to-run `docker-compose.yml` wiring nginx
-with CrowdSec (engine + firewall bouncer + web UI), Prometheus/Grafana
-(CrowdSec metrics only), and Certwarden.
+with CrowdSec (engine + firewall bouncer + web UI) and Certwarden. No
+Prometheus/Grafana — nginx traffic is the VTS HTML dashboard and
+CrowdSec has its own web UI.
 
 ## Image
 
@@ -34,7 +35,8 @@ config layout below):
 |---|---|---|
 | `ndk` + `lua` | Debian `libnginx-mod-http-ndk` / `libnginx-mod-http-lua`, fetched from the **same base image** so the release always matches the running nginx. Built `--with-compat` (the ABI contract that lets the module load into nginx.org's nginx). | **Auto-patched by Debian** on every weekly rebuild. |
 | `vts` | Compiled from **latest** upstream (default branch) against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, on the same base. The custom dashboard is baked in via VTS's `tplToDefine.sh`. | Tracks nginx automatically every rebuild; VTS upstream fixes nginx-compat on that branch first. Pin a one-off with `--build-arg VTS_REF=<tag>`. |
-| CrowdSec bouncer + `lua-resty-*` | Official `crowdsec-nginx-bouncer` `.deb` (GPG-verified) + pinned luarocks deps. | **Pinned** for reproducibility; bump deliberately. |
+| CrowdSec bouncer | Official `crowdsec-nginx-bouncer` `.deb` (GPG-verified); files land at the exact baremetal `apt` paths. | Pinnable via `--build-arg CS_NGINX_BOUNCER_VERSION`; otherwise tracks the repo's current. |
+| `lua-resty-http` / `-string` | Tiny pure-lua libs the bouncer needs, not in Debian — installed **latest** via luarocks (same as you'd do by hand on baremetal plain nginx). | Unpinned; the build-time `nginx -t` guard catches breakage. |
 
 The design principle is **fail-loud-at-build, never-silent-in-prod**: a
 build-time `nginx -t` actually loads all three modules and `require`s the
@@ -63,25 +65,32 @@ before nginx and only does
 `[ -z "$(ls -A /etc/nginx)" ] && cp -rp /usr/local/etc/nginx/* /etc/nginx/`.
 No custom entrypoint, no clobbering.
 
-The pieces that get seeded (and that you copy in by hand if you bring an
-existing config and want the integration):
+What lands in a seeded `/etc/nginx` — named like a normal Debian
+baremetal install, nothing `buco`-branded:
 
-- `modules-enabled/00-buco-modules.conf` — the three `load_module`
-  lines. Loaded at the **main** context; the seeded `nginx.conf` gets an
-  `include /etc/nginx/modules-enabled/*.conf;` line added (stock
-  nginx-ui's `nginx.conf` lacks it). `load_module` is *only* valid in
-  the main context, never inside `http{}`, so it can't be a `conf.d`
-  file. The `.so` files live at `/usr/lib/nginx/modules` (outside
-  `/etc/nginx`), so they're always present regardless of seeding.
-- `conf.d/05-realip.conf` — real client IP behind Docker NAT.
-- `conf.d/10-crowdsec.conf` — resolver + includes the CrowdSec bouncer
-  snippet shipped in the image at `/usr/share` (bind-mount-safe).
-- `conf.d/20-vts.conf` — VTS zone + the `:9113/status` HTML dashboard.
-- `conf.d/06-ratelimit.conf` — rate-limit zones.
+- `modules-enabled/10-mod-http-ndk.conf`,
+  `50-mod-http-lua.conf`,
+  `70-mod-http-vhost-traffic-status.conf` — one `load_module` line each,
+  Debian's `NN-mod-http-<name>.conf` convention. Loaded at the **main**
+  context; the seeded `nginx.conf` gets `include
+  /etc/nginx/modules-enabled/*.conf;` prepended (stock nginx-ui's lacks
+  it; `load_module` is only valid in the main context, never `http{}`).
+  The `.so` files live at `/usr/lib/nginx/modules`, outside `/etc/nginx`.
+- `conf.d/crowdsec_nginx.conf` — the CrowdSec bouncer's **own** nginx
+  snippet, placed exactly where `apt install crowdsec-nginx-bouncer`
+  puts it. Byte-for-byte the baremetal file.
+- `conf.d/resolver.conf` — the one docker-ism: a `resolver` so the
+  bouncer can look up the `crowdsec` service name (unneeded on baremetal
+  where LAPI is `127.0.0.1`).
+- `conf.d/realip.conf` — real client IP behind Docker NAT.
+- `conf.d/vts.conf` — VTS zone + the `:9113/status` HTML dashboard.
+- `conf.d/ratelimit.conf` — rate-limit zones.
 
 To add the integration to an **already-populated** `/etc/nginx`, copy
-this repo's `conf/modules-enabled/*` and `conf/conf.d/{05,10,20,06}*`
-into it and ensure your `nginx.conf` has the two stock includes
+this repo's `conf/modules-enabled/*` and `conf/conf.d/*` into it, plus
+`crowdsec_nginx.conf` (it ships in the bouncer package, not this repo —
+grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .`),
+and ensure your `nginx.conf` has the two stock includes
 (`modules-enabled/*` at main — Debian's default already does;
 `conf.d/*` in `http{}`). The repo's `conf/nginx.conf` is just a plain
 reference skeleton.
@@ -108,15 +117,14 @@ real binary.
 │  nginx (buco7854/nginx)                             │
 │  stock nginx + lua module (CrowdSec bouncer,        │
 │  incl. AppSec) + VTS HTML dashboard + nginx-ui      │
-└──┬───────────────┬──────────────┬───────────────────┘
-   │ access/error  │ AppSec WAF   │ VTS dashboard
-   ▼               ▼              │ :9113/status (HTML, loopback)
-┌─────────────────────────┐      ▼
-│ crowdsec  LAPI  :8080   │  ┌────────────┐
-│           AppSec :7422  │  │ prometheus │──── grafana :3001
-│           metrics:6060 ─┼─▶│ (crowdsec  │     (CrowdSec
-└──┬──────────────┬───────┘  │  only)     │      dashboards)
-   │              │          └────────────┘
+│  VTS dashboard → :9113/status  (HTML, loopback)     │
+└──┬───────────────┬──────────────────────────────────┘
+   │ access/error  │ AppSec WAF
+   ▼               ▼
+┌─────────────────────────┐
+│ crowdsec  LAPI  :8080   │
+│           AppSec :7422  │
+└──┬──────────────┬───────┘
    │ decisions    │ alerts
    ▼              ▼
 ┌─────────────┐  ┌────────────────┐
@@ -130,7 +138,7 @@ certwarden :4055 ──writes /certs/──▶ host /etc/ssl/domains/
 ```
 
 Everything except 80/443 binds to `127.0.0.1` only — nothing on the LAN
-can talk to LAPI, Grafana, the CrowdSec UI, Prometheus, or Certwarden's
+can talk to LAPI, the CrowdSec UI, the VTS dashboard, or Certwarden's
 ports. All services share the `proxy_net` bridge network and resolve
 each other by service name — except the firewall bouncer, which runs
 with `network_mode: host` so it can rewrite iptables, and reaches LAPI
@@ -152,8 +160,8 @@ from the host:
 | `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes (via its `/certs` mount), nginx reads (RO)|
 
 Everything else (nginx-ui state, www files, crowdsec data, web-ui data,
-prometheus/grafana data, certwarden data) stays in relative bind-mount
-dirs next to `docker-compose.yml` — all gitignored.
+certwarden data) stays in relative bind-mount dirs next to
+`docker-compose.yml` — all gitignored.
 
 ## First-time setup
 
@@ -199,8 +207,6 @@ dirs next to `docker-compose.yml` — all gitignored.
    - nginx-ui — http://localhost (served on port 80 via the proxy itself)
    - VTS traffic dashboard — http://localhost:9113/status (the custom
      HTML dashboard baked into the module)
-   - Grafana — http://localhost:3001 (CrowdSec dashboards only; nginx
-     traffic is the VTS dashboard above, not Prometheus)
    - CrowdSec web UI — http://localhost:9321
 
 ## Certwarden integration
@@ -255,10 +261,12 @@ they did on a bare-metal Debian host. To migrate:
   **main** context (Debian's stock `nginx.conf` already does) and
   `include /etc/nginx/conf.d/*.conf;` inside `http{}` (standard).
 - **Copy the drop-ins into your `/etc/nginx/`:** this repo's
-  `conf/modules-enabled/00-buco-modules.conf` and the `conf/conf.d/*`
-  files (`05-realip`, `10-crowdsec`, `20-vts`, `06-ratelimit`). That's
-  the entire integration — no edits to your `nginx.conf` body.
-- **Don't add your own lua/vts `load_module`** — the drop-in handles it.
+  `conf/modules-enabled/*` (`10-mod-http-ndk`, `50-mod-http-lua`,
+  `70-mod-http-vhost-traffic-status`) and `conf/conf.d/*` (`realip`,
+  `resolver`, `vts`, `ratelimit`), plus the bouncer's own
+  `crowdsec_nginx.conf` (`docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .`).
+  That's the entire integration — no edits to your `nginx.conf` body.
+- **Don't add your own lua/vts `load_module`** — the drop-ins handle it.
 - **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
 - **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
   change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
@@ -312,14 +320,13 @@ nginx/
 ├── app.ini                   # minimal nginx-ui config baked into the image
 ├── docker-compose.yml        # full homelab stack
 ├── .env.example              # template — copy to .env (gitignored)
-├── conf/                     # drop-ins — copy into /etc/nginx/ on the host
+├── conf/                     # drop-ins — seeded into /etc/nginx if empty
 │   ├── nginx.conf            # plain skeleton (only for a from-scratch user)
 │   ├── mime.types
-│   ├── modules-enabled/00-buco-modules.conf   # the 3 load_module lines (main ctx)
-│   ├── conf.d/05-realip.conf
-│   ├── conf.d/10-crowdsec.conf                 # resolver + bouncer snippet
-│   ├── conf.d/20-vts.conf                      # VTS zone + :9113/status HTML
-│   ├── conf.d/06-ratelimit.conf
+│   ├── modules-enabled/{10-mod-http-ndk, 50-mod-http-lua,
+│   │                    70-mod-http-vhost-traffic-status}.conf
+│   ├── conf.d/{realip, resolver, vts, ratelimit}.conf
+│   │                          # crowdsec_nginx.conf comes from the .deb
 │   ├── snippets/{ratelimit.conf, security-txt.conf}
 │   └── server-conf.d/.gitkeep
 ├── crowdsec/
@@ -329,8 +336,6 @@ nginx/
 │       ├── acquis.yaml                    # nginx logs + AppSec listener
 │       ├── parsers/s02-enrich/whitelists.yaml
 │       └── appsec-rules/whitelists.yaml
-├── prometheus/prometheus.yml
-├── grafana/provisioning/{datasources, dashboards}
 ├── www/well-known/security.txt
 └── scripts/{write_cert.sh, maintenance_nginx_ui.sh}
 ```
