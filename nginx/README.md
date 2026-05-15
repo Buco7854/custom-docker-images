@@ -52,10 +52,12 @@ The image behaves like a **default nginx-ui install that also ships the
 CrowdSec + VTS integration**. It inherits the base image's `init-config`
 behaviour exactly:
 
-- **Empty `/etc/nginx` on first start** → it's seeded with the default
-  nginx config, the nginx-ui `:80→:9000` proxy, **and** our drop-ins
-  (CrowdSec bouncer, VTS dashboard, real-IP, rate-limit, the
-  `load_module` lines). Works out of the box, nothing to copy.
+- **Empty `/etc/nginx` on first start** → seeded with the default nginx
+  config, the nginx-ui `:80→:9000` proxy, **and only the integration
+  bits that are required to function** (CrowdSec bouncer, VTS dashboard,
+  real-IP, resolver, the `load_module` lines). User-policy config
+  (rate-limiting, `security.txt`) is **not** seeded — it's your choice
+  (see [Optional extras](#optional-extras)).
 - **Existing `/etc/nginx`** (your bind-mounted config) → **nothing is
   touched.** Your config is used verbatim.
 
@@ -65,35 +67,38 @@ before nginx and only does
 `[ -z "$(ls -A /etc/nginx)" ] && cp -rp /usr/local/etc/nginx/* /etc/nginx/`.
 No custom entrypoint, no clobbering.
 
-What lands in a seeded `/etc/nginx` — named like a normal Debian
-baremetal install, nothing `buco`-branded:
+#### Required for the integration to work
 
-- `modules-enabled/10-mod-http-ndk.conf`,
-  `50-mod-http-lua.conf`,
-  `70-mod-http-vhost-traffic-status.conf` — one `load_module` line each,
-  Debian's `NN-mod-http-<name>.conf` convention. Loaded at the **main**
-  context; the seeded `nginx.conf` gets `include
-  /etc/nginx/modules-enabled/*.conf;` prepended (stock nginx-ui's lacks
-  it; `load_module` is only valid in the main context, never `http{}`).
-  The `.so` files live at `/usr/lib/nginx/modules`, outside `/etc/nginx`.
-- `conf.d/crowdsec_nginx.conf` — the CrowdSec bouncer's **own** nginx
-  snippet, placed exactly where `apt install crowdsec-nginx-bouncer`
-  puts it. Byte-for-byte the baremetal file.
-- `conf.d/resolver.conf` — the one docker-ism: a `resolver` so the
-  bouncer can look up the `crowdsec` service name (unneeded on baremetal
-  where LAPI is `127.0.0.1`).
-- `conf.d/realip.conf` — real client IP behind Docker NAT.
-- `conf.d/vts.conf` — VTS zone + the `:9113/status` HTML dashboard.
-- `conf.d/ratelimit.conf` — rate-limit zones.
+If you **import your own `/etc/nginx`** (so nothing is seeded), these are
+the *only* things you must add for the CrowdSec bouncer + VTS + nginx-ui
+to function. Names match a normal Debian baremetal install — nothing
+`buco`-branded:
 
-To add the integration to an **already-populated** `/etc/nginx`, copy
-this repo's `conf/modules-enabled/*` and `conf/conf.d/*` into it, plus
-`crowdsec_nginx.conf` (it ships in the bouncer package, not this repo —
-grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .`),
-and ensure your `nginx.conf` has the two stock includes
-(`modules-enabled/*` at main — Debian's default already does;
-`conf.d/*` in `http{}`). The repo's `conf/nginx.conf` is just a plain
-reference skeleton.
+| File | Why it's required |
+|---|---|
+| `modules-enabled/10-mod-http-ndk.conf`, `50-mod-http-lua.conf`, `70-mod-http-vhost-traffic-status.conf` | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). One line each, Debian's `NN-mod-http-<name>.conf` convention. The `.so` files live in the image at `/usr/lib/nginx/modules` (outside `/etc/nginx`). |
+| `include /etc/nginx/modules-enabled/*.conf;` at the **main** context of your `nginx.conf` | `load_module` is only valid in the main context, never `http{}`. Debian's stock `nginx.conf` already has this line; nginx.org's does not — add it once. |
+| `include /etc/nginx/conf.d/*.conf;` inside `http{}` | Standard; pulls in everything below. |
+| `conf.d/crowdsec_nginx.conf` | The CrowdSec bouncer itself. Ships in the bouncer package, **not this repo** — grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .` (it's byte-for-byte the file `apt install crowdsec-nginx-bouncer` installs). |
+| `conf.d/realip.conf` | Without it the bouncer sees the Docker gateway IP for every request and is effectively useless (it'd ban/allow the gateway, not real clients). |
+| `conf.d/resolver.conf` | The only docker-ism: lets the bouncer's lua client resolve the `crowdsec` service name. Unneeded on real baremetal where LAPI is `127.0.0.1`. |
+| `conf.d/vts.conf` | VTS zone + the `:9113/status` HTML dashboard. Drop this (and `70-mod-http-vhost-traffic-status.conf`) if you don't want the traffic dashboard — the bouncer still works without it. |
+
+Everything is in this repo under `conf/` (except `crowdsec_nginx.conf`,
+which is a package file — see above). The repo's `conf/nginx.conf` is
+just a plain reference skeleton; you don't need it if you bring your own.
+
+#### Optional extras
+
+Shipped as examples under `conf/optional/`, **not** seeded — copy into
+your `/etc/nginx/` only if you want them:
+
+- `optional/conf.d/ratelimit.conf` + `optional/snippets/ratelimit.conf`
+  — connection/request rate-limit zones, opted into per-server with
+  `include snippets/ratelimit.conf;` inside a `server {}` block.
+- `optional/snippets/security-txt.conf` — serves
+  `/.well-known/security.txt` (edit `www/well-known/security.txt` for
+  your contact details), opted in per-server the same way.
 
 ### Service monitoring & control
 
@@ -180,8 +185,8 @@ certwarden data) stays in relative bind-mount dirs next to
    nginx + nginx-ui + CrowdSec + VTS) on first start. Or drop your
    existing Debian-style tree (`nginx.conf`, `sites-enabled/`, …) into
    `/etc/nginx` — if it's non-empty the container won't touch it; then
-   add the integration by copying `conf/modules-enabled/*` and
-   `conf/conf.d/{05,10,20,06}*` into it (see "Config layout").
+   add the required integration files into it (see
+   [Required for the integration to work](#required-for-the-integration-to-work)).
 3. **Match the API keys in the bouncer config files.**
    ```bash
    $EDITOR crowdsec/bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
@@ -252,27 +257,26 @@ docker compose restart crowdsec
 
 ## Nginx config migration
 
-The Debian layout is preserved — `conf.d/`, `sites-available/`,
-`sites-enabled/`, `server-conf.d/`, and `snippets/` all work exactly as
-they did on a bare-metal Debian host. To migrate:
+It's stock nginx, so your existing Debian layout (`conf.d/`,
+`sites-available/`, `sites-enabled/`, `snippets/`, `server-conf.d/`, …)
+works exactly as it did on bare metal — the image adds nothing of its
+own to those, only the required files below. To migrate:
 
 - **Keep your own `nginx.conf`.** You don't need this repo's seed one.
   Just ensure it has `include /etc/nginx/modules-enabled/*.conf;` at the
   **main** context (Debian's stock `nginx.conf` already does) and
   `include /etc/nginx/conf.d/*.conf;` inside `http{}` (standard).
-- **Copy the drop-ins into your `/etc/nginx/`:** this repo's
-  `conf/modules-enabled/*` (`10-mod-http-ndk`, `50-mod-http-lua`,
-  `70-mod-http-vhost-traffic-status`) and `conf/conf.d/*` (`realip`,
-  `resolver`, `vts`, `ratelimit`), plus the bouncer's own
-  `crowdsec_nginx.conf` (`docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .`).
-  That's the entire integration — no edits to your `nginx.conf` body.
+- **Add the required files** listed in
+  [Required for the integration to work](#required-for-the-integration-to-work)
+  — that's the entire integration, no edits to your `nginx.conf` body
+  beyond the two stock `include` lines.
 - **Don't add your own lua/vts `load_module`** — the drop-ins handle it.
 - **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
 - **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
   change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
   (same for `ssl_certificate_key /etc/ssl/domains/<domain>/privkey.pem;`).
-- **Keep includes intact.** Per-server `include /etc/nginx/server-conf.d/*.conf;`
-  and `include /etc/nginx/snippets/...;` lines work unchanged.
+- **Rate-limit / security.txt** are optional — see
+  [Optional extras](#optional-extras) if you want them.
 
 Real-IP directives are already in `nginx.conf` (necessary because the
 container is behind Docker's bridge NAT) — leave them alone.
@@ -320,15 +324,16 @@ nginx/
 ├── app.ini                   # minimal nginx-ui config baked into the image
 ├── docker-compose.yml        # full homelab stack
 ├── .env.example              # template — copy to .env (gitignored)
-├── conf/                     # drop-ins — seeded into /etc/nginx if empty
+├── conf/                     # REQUIRED bits — seeded into /etc/nginx if empty
 │   ├── nginx.conf            # plain skeleton (only for a from-scratch user)
 │   ├── mime.types
 │   ├── modules-enabled/{10-mod-http-ndk, 50-mod-http-lua,
 │   │                    70-mod-http-vhost-traffic-status}.conf
-│   ├── conf.d/{realip, resolver, vts, ratelimit}.conf
+│   ├── conf.d/{realip, resolver, vts}.conf
 │   │                          # crowdsec_nginx.conf comes from the .deb
-│   ├── snippets/{ratelimit.conf, security-txt.conf}
-│   └── server-conf.d/.gitkeep
+│   └── optional/             # NOT seeded — opt-in examples (see README)
+│       ├── conf.d/ratelimit.conf
+│       └── snippets/{ratelimit.conf, security-txt.conf}
 ├── crowdsec/
 │   ├── bouncer.conf                       # nginx Lua bouncer (mounted into nginx)
 │   ├── firewall-bouncer.yaml              # firewall bouncer (mounted into firewall-bouncer)

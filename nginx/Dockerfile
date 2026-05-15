@@ -215,18 +215,17 @@ COPY app.ini /etc/nginx-ui/app.ini
 #                          bouncer + VTS + real-IP + rate-limit, working
 #                          out of the box.
 #   * existing /etc/nginx (your bind-mounted config) -> NOT touched.
-# The .so files live at /usr/lib/nginx/modules (outside /etc/nginx), so
-# they're present regardless of seeding; the template just needs the
-# load_module include, which the stock nginx.conf lacks.
+# Only what's REQUIRED for the bouncer/VTS/nginx-ui to work is seeded:
+# the load_module drop-ins, real client IP (without it the bouncer acts
+# on the Docker gateway IP — useless), the docker resolver, and the VTS
+# zone+dashboard. User-policy extras (rate-limit, security.txt) are NOT
+# seeded — they live in conf/optional/ and are documented as opt-in.
 # (conf.d/crowdsec_nginx.conf was already placed into the template by the
 # bouncer step above, exactly as the .deb does on baremetal.)
 COPY conf/modules-enabled/    /usr/local/etc/nginx/modules-enabled/
 COPY conf/conf.d/realip.conf    /usr/local/etc/nginx/conf.d/realip.conf
 COPY conf/conf.d/resolver.conf  /usr/local/etc/nginx/conf.d/resolver.conf
-COPY conf/conf.d/ratelimit.conf /usr/local/etc/nginx/conf.d/ratelimit.conf
 COPY conf/conf.d/vts.conf       /usr/local/etc/nginx/conf.d/vts.conf
-COPY conf/snippets/           /usr/local/etc/nginx/snippets/
-COPY conf/server-conf.d/      /usr/local/etc/nginx/server-conf.d/
 RUN set -eux; \
     test -f /usr/local/etc/nginx/nginx.conf; \
     if ! grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf; then \

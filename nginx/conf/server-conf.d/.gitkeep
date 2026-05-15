@@ -1,9 +1,0 @@
-# server-conf.d/
-#
-# This directory is included into EVERY server block by adding the line
-#   include /etc/nginx/server-conf.d/*.conf;
-# inside each `server { ... }` in sites-enabled/. Anything you drop here
-# applies globally to all virtual hosts — useful for things like default
-# security headers, common error pages, or HSTS preload.
-#
-# Intentionally empty for now. Reserved for future global server directives.
