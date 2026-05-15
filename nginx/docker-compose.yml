@@ -27,7 +27,7 @@
 services:
 
   nginx:
-    image: buco7854/nginx:latest
+    image: ghcr.io/buco7854/nginx:latest
     container_name: nginx
     restart: unless-stopped
     ports:
