@@ -63,18 +63,17 @@ RUN set -eux; \
 # lua-capable.
 RUN ln -sf /usr/local/openresty/nginx/sbin/nginx /usr/sbin/nginx
 
-# Make OpenResty read its config from /etc/nginx (Debian-style), matching
-# where nginx-ui manages files and where the compose stack bind-mounts the
-# user's ./conf/. OpenResty's compiled-in prefix is
-# /usr/local/openresty/nginx/, so by default it looks for nginx.conf at
-# /usr/local/openresty/nginx/conf/nginx.conf — we replace that file with a
-# symlink to /etc/nginx/nginx.conf. The rest of OpenResty's conf/ dir
-# (mime.types, fastcgi.conf, scgi.conf, uwsgi.conf, koi-*) stays in place
-# so absolute-path includes to those defaults keep working.
-RUN set -eux; \
-    mv /usr/local/openresty/nginx/conf/nginx.conf \
-       /usr/local/openresty/nginx/conf/nginx.conf.openresty-default; \
-    ln -s /etc/nginx/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
+# Point OpenResty's compiled-in conf dir at /etc/nginx so it reads the
+# Debian-style tree that nginx-ui manages (and that the compose stack
+# bind-mounts from ./conf/). OpenResty's compiled prefix is
+# /usr/local/openresty/nginx/, so by default it walks <prefix>/conf/ for
+# nginx.conf, mime.types, fastcgi_params, etc. Replacing that whole
+# directory with a symlink to /etc/nginx redirects every one of those
+# lookups; the nginx:latest base layer already populated /etc/nginx with
+# all the standard files, so nothing is missing if the user doesn't mount
+# their own config.
+RUN rm -rf /usr/local/openresty/nginx/conf && \
+    ln -s /etc/nginx /usr/local/openresty/nginx/conf
 
 # Bake a default app.ini so the image is usable out of the box. Users
 # override by bind-mounting their own at /etc/nginx-ui/app.ini.

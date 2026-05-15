@@ -24,12 +24,13 @@ nothing is hardcoded, so the image follows whatever nginx-ui's base
 becomes.
 
 OpenResty's compiled-in prefix is `/usr/local/openresty/nginx/`, so by
-default it reads `/usr/local/openresty/nginx/conf/nginx.conf`. The image
-replaces that file with a symlink to `/etc/nginx/nginx.conf`, so
-OpenResty reads the Debian-style config that nginx-ui manages and that
-the compose stack bind-mounts. The rest of OpenResty's `conf/` dir
-(`mime.types`, `fastcgi.conf`, etc.) is left in place — `nginx.conf`
-references those defaults by absolute path.
+default it walks `<prefix>/conf/` for `nginx.conf`, `mime.types`,
+`fastcgi_params`, etc. The image replaces that whole directory with a
+symlink to `/etc/nginx`, so every one of those lookups resolves to the
+Debian-style tree nginx-ui manages and the compose stack bind-mounts.
+The `nginx:latest` base layer already populated `/etc/nginx` with all
+the standard files, so nothing is missing if the user doesn't mount
+their own config.
 
 ## Stack overview
 
