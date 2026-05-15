@@ -120,7 +120,7 @@ COPY status.html /tmp/status.html
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential libpcre2-dev libssl-dev zlib1g-dev; \
+        ca-certificates curl git build-essential perl libpcre2-dev libssl-dev zlib1g-dev; \
     NGX_VER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
     cd /tmp; \
     curl -fsSL "https://nginx.org/download/nginx-${NGX_VER}.tar.gz" | tar xz; \
@@ -132,10 +132,18 @@ RUN set -eux; \
             https://github.com/vozlt/nginx-module-vts.git /tmp/vts; \
     fi; \
     echo "compiling VTS ($(git -C /tmp/vts rev-parse --short HEAD)) against nginx ${NGX_VER}"; \
-    # Bake the custom HTML dashboard into the module.
+    # Bake the custom HTML dashboard into the module. tplToDefine.sh invokes
+    # `perl fileToHex.pl` by a BARE relative name, so it only works when run
+    # from util/ — run it there in a subshell (our cwd stays /tmp) writing to
+    # an absolute path. The script has no `set -e` and exits 0 even when
+    # fileToHex.pl can't be found, silently emitting an empty #define that
+    # only explodes later at `make`; assert the macro got a real body so any
+    # such breakage fails the BUILD loudly right here.
     chmod +x /tmp/vts/util/tplToDefine.sh; \
-    /tmp/vts/util/tplToDefine.sh /tmp/status.html \
+    ( cd /tmp/vts/util && ./tplToDefine.sh /tmp/status.html ) \
         > /tmp/vts/src/ngx_http_vhost_traffic_status_module_html.h; \
+    grep -qF '\x' /tmp/vts/src/ngx_http_vhost_traffic_status_module_html.h \
+        || { echo "FATAL: VTS HTML dashboard header is empty (tplToDefine.sh failed)" >&2; exit 1; }; \
     cd "nginx-${NGX_VER}"; \
     ./configure --with-compat --add-dynamic-module=/tmp/vts; \
     make -j"$(nproc)" modules; \
