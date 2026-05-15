@@ -1,193 +1,38 @@
-# buco7854/nginx — homelab reverse-proxy stack
-
-`buco7854/nginx` is `uozi/nginx-ui:latest` with stock nginx replaced by
-OpenResty (LuaJIT built in) so the CrowdSec Lua bouncer can run, plus
-`lua-resty-prometheus` for traffic metrics. This repo also contains a
-ready-to-run `docker-compose.yml` that wires nginx together with CrowdSec
-(engine + web UI), Prometheus, Grafana, and Certwarden into a complete
-reverse-proxy stack.
-
-## Image
-
+# custom-docker-images
+Automated Docker image builder. Builds and publishes images to GHCR on a daily schedule.
+## Images
 | Image | Source | Schedule |
 |-------|--------|----------|
-| `buco7854/nginx:latest`  | this repo's [`Dockerfile`](./Dockerfile) | Weekly Sun 00:00 UTC |
-| `buco7854/nginx:<sha>`   | tagged on every push to `main`           | per-commit            |
+| `ghcr.io/buco7854/yagpdb:latest` | [botlabs-gg/yagpdb](https://github.com/botlabs-gg/yagpdb) | Daily 2:00 UTC |
+| `ghcr.io/buco7854/caddy-cloudflare:latest` | [caddy](https://hub.docker.com/_/caddy) + [caddy-dns/cloudflare](https://github.com/caddy-dns/cloudflare) | Daily 3:00 UTC |
+| `ghcr.io/buco7854/postgres:<tag>` | `./postgres/<tag>/` | Daily 3:00 UTC |
+| `ghcr.io/buco7854/nginx-ui-vts:latest` | [uozi/nginx-ui](https://hub.docker.com/r/uozi/nginx-ui) + [vozlt/nginx-module-vts](https://github.com/vozlt/nginx-module-vts) | Daily 3:00 UTC |
+| `buco7854/nginx:latest` (Docker Hub) | [uozi/nginx-ui](https://hub.docker.com/r/uozi/nginx-ui) + [crowdsecurity/openresty](https://hub.docker.com/r/crowdsecurity/openresty) + [lua-resty-prometheus](https://github.com/knyar/nginx-lua-prometheus) | Weekly Sun 00:00 UTC |
+## Custom Postgres images
+| Tag | Base | Extras |
+|-----|------|--------|
+| `15-cron` | postgres:15-bookworm | pg_cron |
+| `15-cron-bktree` | postgres:15-bookworm | pg_cron + bktree |
+| `16-cron` | postgres:16-bookworm | pg_cron |
+| `18-bktree` | postgres:18-bookworm | bktree |
+To add a new image, just create a new folder under `postgres/` with a `Dockerfile` — it will be picked up automatically on the next run.
 
-Architecture: `uozi/nginx-ui:latest` is the runtime base. s6-overlay (`/init`)
-stays as PID 1 and continues to manage nginx-ui as a service. OpenResty
-binaries are copied in from `crowdsecurity/openresty` (build-stage source
-only, never run as a container) and `/usr/sbin/nginx` is symlinked to the
-OpenResty binary so nginx-ui auto-detects the lua-capable build. The
-Debian release codename is detected from `/etc/os-release` at build time —
-nothing is hardcoded, so the image follows whatever nginx-ui's base
-becomes.
+## nginx-ui-vts
+[`uozi/nginx-ui`](https://hub.docker.com/r/uozi/nginx-ui) with the [VTS module](https://github.com/vozlt/nginx-module-vts) compiled as a dynamic module against the exact nginx version shipped by the upstream image. Adds:
+- A custom HTML dashboard baked into the VTS module
+- A tiny key-protected HTTP API to trigger `nginx -s reload` from other containers (so e.g. Certwarden can reload nginx after issuing a cert)
+- `supercronic` reading a crontab file (path: `$CRONTAB_FILE`, default `/etc/cron.d/default.crontab`) — mount your own to override
+- Bundled maintenance jobs: SQLite VACUUM of the nginx-ui DB, `security.txt` Expires-renewal, abandoned-body cleanup
 
-## Stack overview
+See [`examples/`](./examples) for a full compose stack with Certwarden + CrowdSec.
 
-```
-Internet
-    │ 80/443
-    ▼
-┌─────────────────────────────────────────────────────┐
-│  nginx (buco7854/nginx)                             │
-│  OpenResty + CrowdSec Lua bouncer + nginx-ui        │
-│  nginx-ui web UI accessible via port 80             │
-└──────┬──────────────┬───────────────────────────────┘
-       │              │
-       │ logs         │ /metrics :9113
-       ▼              ▼
-┌──────────┐    ┌────────────┐
-│ crowdsec │    │ prometheus │──── grafana :3001
-│ LAPI     │    └────────────┘
-│ :8080    │
-└────┬─────┘
-     │
-     ▼
-┌──────────────┐
-│ crowdsec-ui  │
-│ :3000        │
-└──────────────┘
+## nginx
+[`uozi/nginx-ui`](https://hub.docker.com/r/uozi/nginx-ui) with stock nginx replaced by [OpenResty](https://hub.docker.com/r/crowdsecurity/openresty) (LuaJIT built in) so the CrowdSec Lua bouncer can run, plus [`lua-resty-prometheus`](https://github.com/knyar/nginx-lua-prometheus) installed via `opm` for traffic metrics. Published to Docker Hub as `buco7854/nginx`. See [`nginx/`](./nginx) for the Dockerfile, image-specific README, and a ready-to-run `docker-compose.yml` (nginx + crowdsec + crowdsec-ui + prometheus + grafana + certwarden).
 
-certwarden :4055 ──writes certs──▶ ./ssl/
-                 ──POST reload──▶  nginx /api/nginx/reload
-```
-
-Everything except 80/443 binds to `127.0.0.1` only — nothing on the LAN
-can talk to LAPI, Grafana, the CrowdSec UI, Prometheus, or Certwarden's
-admin port. All services share the `proxy_net` bridge network, so they
-resolve each other by service name (`nginx`, `crowdsec`, `prometheus`,
-etc.).
-
-## First-time setup
-
-1. **Clone and configure.**
-   ```bash
-   git clone https://github.com/buco7854/custom-docker-images
-   cd custom-docker-images
-   cp .env.example .env
-   $EDITOR .env
-   ```
-2. **Drop in your existing nginx config.** Copy your Debian-style tree
-   (`sites-available/`, `sites-enabled/`, plus any custom files) into
-   `./nginx/conf/` next to the seed `nginx.conf`. The structure is
-   preserved 1:1.
-3. **Seed certs.** Either drop existing cert pairs into
-   `./ssl/<domain>/{fullchain,privkey}.pem`, or let Certwarden write
-   them on first issuance.
-4. **Match the API keys.** Edit `nginx-ui/app.ini` (created on first
-   start) so that `[auth] ApiKey` matches `NGINX_UI_API_KEY` in `.env`.
-   Edit `crowdsec/bouncer.conf` so `API_KEY` matches
-   `CROWDSEC_BOUNCER_API_KEY` in `.env`.
-5. **Bring it up.**
-   ```bash
-   docker compose up -d
-   ```
-   The `BOUNCER_KEY_nginx` env var on the CrowdSec service auto-registers
-   that bouncer key on first start, so the nginx bouncer authenticates
-   immediately.
-6. **Generate the web-UI bouncer key.**
-   ```bash
-   docker compose exec crowdsec cscli bouncers add crowdsec-web-ui
-   ```
-   Paste the key into `.env` as `CROWDSEC_WEB_UI_API_KEY`, then:
-   ```bash
-   docker compose restart crowdsec-ui
-   ```
-7. **Open the UIs.**
-   - nginx-ui — http://localhost (served on port 80 via the proxy itself)
-   - Grafana — http://localhost:3001 (import dashboard ID `10442` for
-     nginx metrics)
-   - CrowdSec web UI — http://localhost:3000
-
-## Certwarden integration
-
-Certwarden runs its post-issuance hook script inside its own container.
-The compose file already mounts `./scripts:/scripts:ro` into Certwarden,
-so configure Certwarden to run `/scripts/write_cert.sh` after issuance.
-
-The script expects these env vars (which Certwarden passes, plus
-`NGINX_UI_API_KEY` from your `.env`):
-
-| Var               | Source                                |
-|-------------------|---------------------------------------|
-| `CERTIFICATE_PEM` | Certwarden — PEM-encoded fullchain    |
-| `PRIVATE_KEY_PEM` | Certwarden — PEM-encoded private key  |
-| `CERTIFICATE_NAME`| Certwarden — logical cert/domain name |
-| `NGINX_UI_API_KEY`| `.env`                                |
-
-The hook writes `fullchain.pem` and `privkey.pem` under
-`/etc/ssl/domains/<CERTIFICATE_NAME>/` (which is `./ssl/` on the host,
-bind-mounted into nginx read-only) and then `POST`s
-`http://nginx/api/nginx/reload` with the `X-API-Key` header to trigger
-`nginx -s reload`.
-
-## Nginx config migration
-
-The Debian layout is preserved — `conf.d/`, `sites-available/`,
-`sites-enabled/`, `server-conf.d/`, and `snippets/` all work exactly as
-they did on a bare-metal Debian host. To migrate:
-
-- **Drop your existing tree into `./nginx/conf/`.** Don't merge —
-  literally copy the directory.
-- **Remove `load_module ...` lines.** OpenResty has Lua built in; no
-  dynamic modules to load.
-- **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
-- **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
-  change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
-  (same for `ssl_certificate_key /etc/ssl/domains/<domain>/privkey.pem;`).
-- **Keep includes intact.** Per-server `include /etc/nginx/server-conf.d/*.conf;`
-  and `include /etc/nginx/snippets/...;` lines work unchanged.
-
-Real-IP directives are already in `nginx.conf` (necessary because the
-container is behind Docker's bridge NAT) — leave them alone.
-
-## Maintenance script
-
-Disables nginx-ui's upstream/site health checks daily (they generate
-constant background traffic to every backend, which we don't want).
-
+## Usage
 ```bash
-sudo cp scripts/maintenance_nginx_ui.sh /usr/local/bin/
-sudo chmod +x /usr/local/bin/maintenance_nginx_ui.sh
-echo "0 4 * * * root /usr/local/bin/maintenance_nginx_ui.sh >> /var/log/maintenance_nginx_ui.log 2>&1" \
-    | sudo tee /etc/cron.d/nginx-ui-maintenance
+docker pull ghcr.io/buco7854/yagpdb:latest
+docker pull ghcr.io/buco7854/caddy-cloudflare:latest
+docker pull ghcr.io/buco7854/postgres:16-cron
 ```
-
-The script `docker exec`s into the `nginx` container and runs `sqlite3`
-against `/etc/nginx-ui/database.db` — no host-side `nginx-ui` needed.
-
-## Upgrading
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-The GitHub Actions workflow rebuilds and pushes `buco7854/nginx:latest`
-every Sunday at 00:00 UTC, picking up upstream changes to
-`uozi/nginx-ui:latest`, `crowdsecurity/openresty:latest`, and the
-underlying Debian base.
-
-## Repository layout
-
-```
-.
-├── Dockerfile                # buco7854/nginx image
-├── app.ini                   # default nginx-ui config baked into the image
-├── docker-compose.yml        # full homelab stack
-├── .env.example
-├── .github/workflows/docker-publish.yml
-├── nginx/conf/               # bind-mounted to /etc/nginx in the container
-│   ├── nginx.conf
-│   ├── conf.d/{01-crowdsec.conf, 06-ratelimit.conf}
-│   ├── snippets/{ratelimit.conf, security-txt.conf}
-│   └── server-conf.d/.gitkeep
-├── crowdsec/
-│   ├── bouncer.conf
-│   └── config/acquis.yaml
-├── prometheus/prometheus.yml
-├── grafana/provisioning/{datasources, dashboards}
-├── www/well-known/security.txt
-└── scripts/{write_cert.sh, maintenance_nginx_ui.sh}
-```
+> Packages are private by default (if repo is private in my case it is public). To make them public: GitHub profile → Packages → select image → Package Settings → change visibility.

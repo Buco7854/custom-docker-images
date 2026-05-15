@@ -4,8 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Dockerfile'
-      - 'app.ini'
+      - 'nginx/**'
       - '.github/workflows/docker-publish.yml'
   schedule:
     # Weekly — Sunday 00:00 UTC. Picks up upstream changes to
@@ -54,8 +53,8 @@ jobs:
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./nginx
+          file: ./nginx/Dockerfile
           pull: true
           push: true
           platforms: linux/amd64,linux/arm64
