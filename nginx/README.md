@@ -32,6 +32,26 @@ and `app.ini` points `SbinPath` at the wrapper so every nginx-ui call
 argv left-to-right and the last `-c` wins, so a caller passing its own
 `-c` (e.g. validating a staged config) cleanly overrides ours.
 
+### Service monitoring & control
+
+Verified against nginx-ui's
+[service monitoring and control](https://nginxui.com/guide/config-nginx#service-monitoring-and-control)
+behaviour. In the `uozi/nginx-ui` base, nginx is **s6-supervised** (the
+`nginx` longrun service runs `nginx -g "daemon off;"`, which resolves
+via PATH to our wrapper), and nginx-ui runs as a separate s6 service
+that controls it via the `[nginx]` settings in `app.ini`:
+
+| nginx-ui action | Configured via | Result with the wrapper |
+|---|---|---|
+| Status detection | `PIDPath` | Set to `/usr/local/openresty/nginx/logs/nginx.pid`, identical to the `pid` directive in `conf/nginx.conf`. nginx writes that file even under `daemon off;`, so `IsRunning()` is accurate. |
+| Test config | `TestConfigCmd` | `/usr/sbin/nginx -t` → wrapper → `openresty -c /etc/nginx/nginx.conf -t`. |
+| Reload | `ReloadCmd` | `/usr/sbin/nginx -s reload` → wrapper. This is the path Certwarden's cert reload uses. |
+| Restart | `RestartCmd` | **Must be set explicitly.** Left empty, nginx-ui falls back to `start-stop-daemon --start --exec /usr/sbin/nginx`; because the wrapper `exec()`s a different binary, `/proc/PID/exe` never equals `/usr/sbin/nginx`, the `--exec` match fails against the s6-respawned process, and a duplicate start hits a port conflict. We set `RestartCmd = /usr/sbin/nginx -s stop`: nginx stops, s6 immediately respawns it with fresh config — a real restart with no start-stop-daemon involved. |
+
+`PIDPath` in `app.ini` and the `pid` directive in `conf/nginx.conf`
+**must stay in lockstep** — if you change one, change the other, or
+status detection (and the Reload→Restart fallback) breaks.
+
 ## Stack overview
 
 ```
