@@ -1,0 +1,138 @@
+# Homelab reverse-proxy stack:
+#   nginx                      — stock nginx + lua module (CrowdSec bouncer) + VTS + nginx-ui
+#   crowdsec                   — LAPI reading nginx logs + AppSec (WAF)
+#   crowdsec-firewall-bouncer  — applies LAPI decisions to host iptables
+#   crowdsec-web-ui            — web UI for alerts/decisions
+#   certwarden                 — Let's Encrypt cert manager
+#
+# nginx traffic is the VTS HTML dashboard at :9113/status; CrowdSec has
+# its own web UI — there is no Prometheus/Grafana.
+#
+# Non-web ports bind to 127.0.0.1 only so nothing except 80/443 leaks
+# onto the LAN. Services share `proxy_net` (except the firewall bouncer,
+# which uses host networking so it can rewrite iptables).
+#
+# Host paths (canonical Debian layout):
+#   /etc/nginx           nginx config (bind-mounted into the nginx container)
+#   /var/log/nginx       access/error logs (RW for nginx, RO for crowdsec)
+#   /etc/ssl/domains     SSL certs (certwarden writes via /certs, nginx reads)
+#
+# First run:
+#   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
+#   cp .env.example .env  &&  $EDITOR .env
+# Leave /etc/nginx EMPTY and the container seeds it (default nginx +
+# nginx-ui + CrowdSec + VTS) on first start. If /etc/nginx already has a
+# config it is left untouched (add the drop-ins by hand — see README).
+
+services:
+
+  nginx:
+    image: buco7854/nginx:latest
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:9113:9113"   # VTS HTML dashboard (/status) — loopback only
+    volumes:
+      - /etc/nginx:/etc/nginx
+      - /var/log/nginx:/var/log/nginx
+      - /etc/ssl/domains:/etc/ssl/domains:ro
+      - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
+      - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+      - ./www:/var/www                                            # static files (security.txt etc.)
+    environment:
+      - TZ=${TZ}
+    networks:
+      - proxy_net
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    volumes:
+      - ./crowdsec/config:/etc/crowdsec
+      - ./crowdsec/data:/var/lib/crowdsec/data
+      - /var/log/nginx:/var/log/nginx:ro
+    environment:
+      - TZ=${TZ}
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+      - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
+      - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
+    ports:
+      - "127.0.0.1:8080:8080"      # LAPI — loopback (firewall bouncer uses this over host net)
+    expose:
+      - "7422"                     # AppSec listener — compose net only
+    networks:
+      - proxy_net
+
+  crowdsec-firewall-bouncer:
+    image: crowdsecurity/crowdsec-firewall-bouncer:latest
+    container_name: crowdsec-firewall-bouncer
+    restart: unless-stopped
+    # host network so we can write iptables on the host — the bouncer
+    # reaches LAPI via 127.0.0.1:8080 (published above by the crowdsec
+    # service on loopback).
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./crowdsec/firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+    depends_on:
+      - crowdsec
+
+  crowdsec-web-ui:
+    image: ghcr.io/theduffman85/crowdsec-web-ui:latest
+    container_name: crowdsec_web_ui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CROWDSEC_UI_PORT}:3000"
+    environment:
+      # In this single stack the web UI reaches LAPI over proxy_net as
+      # `crowdsec:8080`. (Upstream's host.docker.internal:8080 only works
+      # when the web UI lives in a SEPARATE compose project — see .env.)
+      - CROWDSEC_URL=${CROWDSEC_API_URL}
+      - CROWDSEC_USER=${CROWDSEC_UI_USER}
+      - CROWDSEC_PASSWORD=${CROWDSEC_UI_PASSWORD}
+      - CROWDSEC_LOOKBACK_PERIOD=${CROWDSEC_LOOKBACK}
+      - CROWDSEC_REFRESH_INTERVAL=${CROWDSEC_REFRESH}
+      - CROWDSEC_IDLE_REFRESH_INTERVAL=${CROWDSEC_IDLE_REFRESH}
+      - CROWDSEC_IDLE_THRESHOLD=${CROWDSEC_IDLE_LIMIT}
+      - CROWDSEC_FULL_REFRESH_INTERVAL=${CROWDSEC_CACHE_REFRESH}
+      - CROWDSEC_ALERT_INCLUDE_ORIGINS=${CROWDSEC_ALERT_INCLUDE_ORIGINS}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGINS=${CROWDSEC_ALERT_EXCLUDE_ORIGINS}
+      - CROWDSEC_ALERT_INCLUDE_CAPI=${CROWDSEC_ALERT_INCLUDE_CAPI}
+      - CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY}
+    volumes:
+      - ${CROWDSEC_UI_DATA_PATH}:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - crowdsec
+    networks:
+      - proxy_net
+
+  certwarden:
+    image: ghcr.io/gregtwallace/certwarden:latest
+    container_name: certwarden
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4050:4050"   # server interface (http)
+      - "127.0.0.1:4055:4055"   # server interface (https)
+      - "127.0.0.1:4060:4060"   # http-01 challenge server (http)
+      - "127.0.0.1:4065:4065"   # pprof debug server (http)
+      - "127.0.0.1:4070:4070"   # pprof debug server (https)
+    volumes:
+      - ./certwarden/data:/app/data
+      - ./scripts:/scripts:ro                # post-issuance hook lives here
+      - /etc/ssl/domains:/certs              # writes /certs/<name>/{fullchain,privkey}.pem
+    networks:
+      - proxy_net
+
+networks:
+  proxy_net:
+    driver: bridge

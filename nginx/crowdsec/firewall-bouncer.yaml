@@ -1,0 +1,32 @@
+# crowdsec-firewall-bouncer config.
+#
+# This file is bind-mounted into the bouncer container at
+# /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml — edit `api_key`
+# here without rebuilding.
+#
+# The bouncer runs with `network_mode: host` so it can manipulate
+# iptables. It reaches LAPI via 127.0.0.1:8080 because the crowdsec
+# service publishes LAPI on the host loopback for exactly this purpose.
+
+mode: iptables
+update_frequency: 10s
+log_mode: stdout
+log_level: info
+
+api_url: http://127.0.0.1:8080/
+api_key: REPLACE_WITH_CROWDSEC_FW_BOUNCER_API_KEY
+
+disable_ipv6: false
+deny_action: DROP
+deny_log: false
+
+supported_decisions_types:
+  - ban
+
+blacklists_ipv4: crowdsec-blacklists
+blacklists_ipv6: crowdsec6-blacklists
+
+iptables_chains:
+  - INPUT
+  - FORWARD
+  - DOCKER-USER

@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Runtime/state dirs created by the compose stack
+nginx/nginx-ui/
+nginx/crowdsec/data/
+nginx/crowdsec-web-ui/
+nginx/certwarden/data/
+nginx/prometheus/data/
+nginx/grafana/data/
+nginx/data/
