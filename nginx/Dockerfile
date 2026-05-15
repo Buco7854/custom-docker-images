@@ -57,23 +57,14 @@ RUN set -eux; \
     apt-get purge -y --auto-remove gnupg; \
     rm -rf /var/lib/apt/lists/* /root/.cache
 
-# Make `nginx` on PATH resolve to OpenResty. nginx-ui inspects whatever
-# binary is named `nginx` in PATH to decide what features are available;
-# pointing it at OpenResty is enough to make it treat the build as
-# lua-capable.
-RUN ln -sf /usr/local/openresty/nginx/sbin/nginx /usr/sbin/nginx
-
-# Point OpenResty's compiled-in conf dir at /etc/nginx so it reads the
-# Debian-style tree that nginx-ui manages (and that the compose stack
-# bind-mounts from ./conf/). OpenResty's compiled prefix is
-# /usr/local/openresty/nginx/, so by default it walks <prefix>/conf/ for
-# nginx.conf, mime.types, fastcgi_params, etc. Replacing that whole
-# directory with a symlink to /etc/nginx redirects every one of those
-# lookups; the nginx:latest base layer already populated /etc/nginx with
-# all the standard files, so nothing is missing if the user doesn't mount
-# their own config.
-RUN rm -rf /usr/local/openresty/nginx/conf && \
-    ln -s /etc/nginx /usr/local/openresty/nginx/conf
+# Install /usr/sbin/nginx as a wrapper that runs OpenResty with
+# `-c /etc/nginx/nginx.conf`. nginx-ui calls `nginx` (via SbinPath, which
+# we point at the wrapper in app.ini), so all of its invocations —
+# `nginx -t`, `nginx -s reload`, `nginx -V`, etc. — go through the
+# wrapper and inherit the Debian-style config path. OpenResty's own
+# installation under /usr/local/openresty stays untouched.
+COPY nginx-wrapper.sh /usr/sbin/nginx
+RUN chmod +x /usr/sbin/nginx
 
 # Bake a default app.ini so the image is usable out of the box. Users
 # override by bind-mounting their own at /etc/nginx-ui/app.ini.

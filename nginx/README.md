@@ -23,14 +23,14 @@ Debian release codename is detected from `/etc/os-release` at build time —
 nothing is hardcoded, so the image follows whatever nginx-ui's base
 becomes.
 
-OpenResty's compiled-in prefix is `/usr/local/openresty/nginx/`, so by
-default it walks `<prefix>/conf/` for `nginx.conf`, `mime.types`,
-`fastcgi_params`, etc. The image replaces that whole directory with a
-symlink to `/etc/nginx`, so every one of those lookups resolves to the
-Debian-style tree nginx-ui manages and the compose stack bind-mounts.
-The `nginx:latest` base layer already populated `/etc/nginx` with all
-the standard files, so nothing is missing if the user doesn't mount
-their own config.
+OpenResty's compiled-in default config path is
+`/usr/local/openresty/nginx/conf/nginx.conf`. Rather than mess with
+OpenResty's installation directory, the image installs `/usr/sbin/nginx`
+as a tiny wrapper that runs OpenResty with `-c /etc/nginx/nginx.conf`,
+and `app.ini` points `SbinPath` at the wrapper so every nginx-ui call
+(`nginx -t`, `nginx -s reload`, etc.) inherits the flag. nginx parses
+argv left-to-right and the last `-c` wins, so a caller passing its own
+`-c` (e.g. validating a staged config) cleanly overrides ours.
 
 ## Stack overview
 
