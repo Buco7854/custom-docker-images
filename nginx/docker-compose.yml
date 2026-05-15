@@ -1,5 +1,5 @@
 # Homelab reverse-proxy stack:
-#   nginx                      — OpenResty + nginx-ui + CrowdSec lua bouncer
+#   nginx                      — stock nginx + lua module (CrowdSec bouncer) + VTS + nginx-ui
 #   crowdsec                   — LAPI reading nginx logs + AppSec (WAF)
 #   crowdsec-firewall-bouncer  — applies LAPI decisions to host iptables
 #   crowdsec-web-ui            — web UI for alerts/decisions
@@ -35,7 +35,7 @@ services:
       - /var/log/nginx:/var/log/nginx
       - /etc/ssl/domains:/etc/ssl/domains:ro
       - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
-      - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-openresty-bouncer.conf
+      - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
       - ./www:/var/www                                            # static files (security.txt etc.)
     environment:
       - TZ=${TZ}

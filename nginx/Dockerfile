@@ -1,91 +1,199 @@
 # syntax=docker/dockerfile:1.7
 #
-# buco7854/nginx — uozi/nginx-ui with stock nginx replaced by OpenResty
-# (LuaJIT built in) so the CrowdSec Lua bouncer can run, plus
-# lua-resty-prometheus for traffic metrics scraped by Prometheus.
+# buco7854/nginx — uozi/nginx-ui + CrowdSec Lua bouncer + nginx-module-vts,
+# the Debian-native way. NO OpenResty (its apt repo lags Debian releases
+# by many months — unworkable).
 #
-# Architecture: nginx-ui (uozi/nginx-ui:latest) is the runtime base. It is
-# managed by s6-overlay as PID 1 (NGINX_UI_OFFICIAL_DOCKER=true). We do NOT
-# replace the entrypoint — s6 stays in charge. We DO override the nginx
-# binary that PATH resolves to by symlinking OpenResty over /usr/sbin/nginx,
-# which makes nginx-ui auto-detect the OpenResty build (compat,
-# lua-nginx-module, http2/http3, all the modules it ships).
+# Two things get added to the stock nginx that uozi/nginx-ui ships:
 #
-# crowdsecurity/openresty is used only as a build-stage copy source:
-#   * /usr/local/openresty/                          full OpenResty + LuaJIT
-#   * /usr/local/openresty/lualib/plugins/crowdsec/  CrowdSec bouncer lua lib
-#   * /var/lib/crowdsec/lua/templates/               ban/captcha HTML templates
+#   1. lua  — Debian's libnginx-mod-http-lua + libnginx-mod-http-ndk.
+#             Debian builds them --with-compat, exactly the ABI contract
+#             that lets a dynamic module load into nginx.org's nginx.
+#             Fetched from the SAME base image, so the module always
+#             matches the running nginx's Debian release. Auto-patched by
+#             Debian on every weekly rebuild. Used ONLY by the CrowdSec
+#             bouncer.
 #
-# Debian codename is detected from /etc/os-release at build time — uozi's
-# base tracks nginx:latest, which is on trixie today but will change.
+#   2. vts  — nginx-module-vts has no Debian package, so it's compiled as
+#             a dynamic module against the EXACT nginx version uozi ships
+#             (detected from `nginx -v`), --with-compat, in a builder
+#             stage on the SAME base (identical pcre2/openssl/zlib as
+#             runtime). It exposes Prometheus metrics natively — no lua
+#             needed for metrics.
+#
+# A build-time `nginx -t` that loads all three modules and requires the
+# lua deps is the guard: any upstream break fails the BUILD loudly, it
+# never silently ships a broken image.
+#
+# Maintenance posture:
+#   * nginx + lua module: auto-patched by Debian each weekly rebuild.
+#   * VTS: recompiled against whatever nginx version uozi ships, every
+#     rebuild — tracks nginx automatically. Bump VTS_VERSION only if a
+#     future nginx breaks the pinned VTS (the build will tell you).
+#   * CrowdSec bouncer + lua-resty-*: PINNED for reproducibility.
+#   * No OpenResty, no nginx wrapper. Stock nginx => nginx-ui just works.
+
+ARG NGINX_UI_TAG=latest
 
 ############################################################
-# Stage 1: copy source — OpenResty + CrowdSec bouncer assets
+# Stage 1: collect .deb + lua assets from the SAME base
 ############################################################
-FROM crowdsecurity/openresty AS openresty-source
+FROM uozi/nginx-ui:${NGINX_UI_TAG} AS assets
+
+ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
+# CrowdSec's packagecloud doesn't track every Debian release, but the
+# nginx bouncer .deb is pure lua + config + html (NO native binaries),
+# so the release it targets is irrelevant. Asserted below.
+ARG CROWDSEC_DEBIAN_RELEASE=bookworm
+ARG CS_NGINX_BOUNCER_VERSION=
+ARG LUA_RESTY_HTTP_VERSION=0.17.2-0
+ARG LUA_RESTY_STRING_VERSION=0.16-0
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg luarocks; \
+    \
+    mkdir -p /assets/deb; cd /assets/deb; \
+    apt-get download libnginx-mod-http-lua libnginx-mod-http-ndk; \
+    \
+    curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /tmp/cs.key; \
+    fpr="$(gpg --show-keys --with-fingerprint --with-colons /tmp/cs.key \
+            | awk -F: '/^fpr/ {print $10; exit}')"; \
+    [ "$fpr" = "${CROWDSEC_GPG_FINGERPRINT}" ] \
+        || { echo "FATAL: CrowdSec GPG fingerprint mismatch ($fpr)" >&2; exit 1; }; \
+    install -d /usr/share/keyrings; \
+    gpg --dearmor < /tmp/cs.key > /usr/share/keyrings/crowdsec.gpg; \
+    echo "deb [signed-by=/usr/share/keyrings/crowdsec.gpg] https://packagecloud.io/crowdsec/crowdsec/debian/ ${CROWDSEC_DEBIAN_RELEASE} main" \
+        > /etc/apt/sources.list.d/crowdsec.list; \
+    apt-get update; \
+    if [ -n "${CS_NGINX_BOUNCER_VERSION}" ]; then \
+        apt-get download "crowdsec-nginx-bouncer=${CS_NGINX_BOUNCER_VERSION}*"; \
+    else \
+        apt-get download crowdsec-nginx-bouncer; \
+    fi; \
+    \
+    mkdir -p /assets/lua /assets/bouncer; \
+    dpkg-deb -x "$(ls libnginx-mod-http-lua_*.deb)" /assets/lua; \
+    dpkg-deb -x "$(ls libnginx-mod-http-ndk_*.deb)" /assets/lua; \
+    dpkg-deb -x "$(ls crowdsec-nginx-bouncer_*.deb)" /assets/bouncer; \
+    \
+    luarocks install lua-resty-http "${LUA_RESTY_HTTP_VERSION}" --tree=/assets/luatree; \
+    luarocks install lua-resty-string "${LUA_RESTY_STRING_VERSION}" --tree=/assets/luatree; \
+    \
+    # Guard: bouncer .deb must stay pure lua/config (no ELF binaries).
+    if find /assets/bouncer -type f -exec sh -c 'head -c4 "$1"|grep -q ELF' _ {} \; -print | grep -q .; then \
+        echo "FATAL: CrowdSec bouncer .deb now ships native binaries" >&2; exit 1; \
+    fi; \
+    for f in crowdsec.lua ban.html captcha.html crowdsec_nginx.conf crowdsec-nginx-bouncer.conf; do \
+        find /assets/bouncer -name "$f" -print -quit | grep -q . \
+            || { echo "FATAL: $f missing from CrowdSec bouncer .deb" >&2; exit 1; }; \
+    done; \
+    find /assets/lua -name 'ngx_http_lua_module.so' -print -quit | grep -q . \
+        || { echo "FATAL: ngx_http_lua_module.so missing" >&2; exit 1; }
 
 ############################################################
-# Stage 2: final image
+# Stage 2: compile nginx-module-vts against the exact nginx
 ############################################################
-FROM uozi/nginx-ui:latest
+FROM uozi/nginx-ui:${NGINX_UI_TAG} AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Pinned for reproducibility. Bump only if a newer nginx ever needs it
+# (the final-stage build guard will fail loudly if VTS is incompatible).
+ARG VTS_VERSION=v0.2.2
 
-# OpenResty itself (binaries, lualib including the CrowdSec bouncer plugin)
-# and the bouncer's HTML templates.
-COPY --from=openresty-source /usr/local/openresty /usr/local/openresty
-COPY --from=openresty-source /var/lib/crowdsec/lua/templates /var/lib/crowdsec/lua/templates
-
-# Add the OpenResty apt repo so we can install openresty-opm, then use opm
-# to install lua-resty-prometheus. The Debian release codename is detected
-# dynamically — do not hardcode it.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg sqlite3; \
-    . /etc/os-release; \
-    CODENAME="${VERSION_CODENAME:?could not read VERSION_CODENAME from /etc/os-release}"; \
-    echo "Detected Debian codename: ${CODENAME}"; \
-    install -d /usr/share/keyrings; \
-    curl -fsSL https://openresty.org/package/pubkey.gpg \
-        | gpg --dearmor -o /usr/share/keyrings/openresty.gpg; \
-    echo "deb [signed-by=/usr/share/keyrings/openresty.gpg] http://openresty.org/package/debian ${CODENAME} openresty" \
-        > /etc/apt/sources.list.d/openresty.list; \
+        ca-certificates curl build-essential libpcre2-dev libssl-dev zlib1g-dev; \
+    NGX_VER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
+    echo "compiling VTS ${VTS_VERSION} against nginx ${NGX_VER}"; \
+    cd /tmp; \
+    curl -fsSL "https://nginx.org/download/nginx-${NGX_VER}.tar.gz" | tar xz; \
+    curl -fsSL "https://github.com/vozlt/nginx-module-vts/archive/refs/tags/${VTS_VERSION}.tar.gz" \
+        | tar xz; \
+    cd "nginx-${NGX_VER}"; \
+    ./configure --with-compat \
+        --add-dynamic-module="/tmp/nginx-module-vts-${VTS_VERSION#v}"; \
+    make -j"$(nproc)" modules; \
+    mkdir -p /assets; \
+    cp objs/ngx_http_vhost_traffic_status_module.so /assets/
+
+############################################################
+# Stage 3: final image
+############################################################
+ARG NGINX_UI_TAG
+FROM uozi/nginx-ui:${NGINX_UI_TAG}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN grep -qiE '^ID(_LIKE)?=.*(debian|ubuntu)' /etc/os-release \
+    || { echo "FATAL: base image is not Debian-family" >&2; exit 1; }
+
+# Only runtime apt deps: lua-cjson (native, the bouncer needs it),
+# sqlite3 (host-driven nginx-ui DB maintenance via `docker exec`).
+RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends openresty-opm; \
-    /usr/local/openresty/bin/opm get knyar/nginx-lua-prometheus; \
-    apt-get purge -y --auto-remove gnupg; \
-    rm -rf /var/lib/apt/lists/* /root/.cache
+    apt-get install -y --no-install-recommends lua-cjson sqlite3 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
 
-# Install /usr/sbin/nginx as a wrapper that runs OpenResty with
-# `-c /etc/nginx/nginx.conf`. nginx-ui calls `nginx` (via SbinPath, which
-# we point at the wrapper in app.ini), so all of its invocations —
-# `nginx -t`, `nginx -s reload`, `nginx -V`, etc. — go through the
-# wrapper and inherit the Debian-style config path. OpenResty's own
-# installation under /usr/local/openresty stays untouched.
-COPY nginx-wrapper.sh /usr/sbin/nginx
-RUN chmod +x /usr/sbin/nginx
+# Install lua + ndk (Debian) and vts (compiled) at the modules path
+# discovered from `nginx -V`. These .so files live under /usr/lib/nginx
+# (NOT /etc/nginx), so a host bind mount of /etc/nginx can't hide them;
+# the seed nginx.conf load_module lines point straight here.
+COPY --from=assets  /assets/lua /tmp/lua
+COPY --from=builder /assets/ngx_http_vhost_traffic_status_module.so /tmp/vts.so
+RUN set -eux; \
+    MODPATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
+    [ -n "$MODPATH" ] || MODPATH=/usr/lib/nginx/modules; \
+    mkdir -p "$MODPATH"; \
+    install -m644 "$(find /tmp/lua -name ndk_http_module.so -print -quit)" \
+        "$MODPATH/ndk_http_module.so"; \
+    install -m644 "$(find /tmp/lua -name ngx_http_lua_module.so -print -quit)" \
+        "$MODPATH/ngx_http_lua_module.so"; \
+    install -m644 /tmp/vts.so "$MODPATH/ngx_http_vhost_traffic_status_module.so"; \
+    rm -rf /tmp/lua /tmp/vts.so
 
-# Bake a default app.ini so the image is usable out of the box. Users
-# override by bind-mounting their own at /etc/nginx-ui/app.ini.
+# CrowdSec bouncer assets at canonical paths. The http-level snippet is
+# stashed under /usr/share (NOT /etc/nginx) so a user bind mount can't
+# hide it; conf.d/01-crowdsec.conf includes it from there.
+COPY --from=assets /assets/bouncer /tmp/bouncer
+RUN set -eux; \
+    mkdir -p /usr/lib/crowdsec/lua /var/lib/crowdsec/lua/templates \
+             /etc/crowdsec/bouncers /usr/share/cs-nginx-bouncer; \
+    cp -r "$(dirname "$(find /tmp/bouncer -name crowdsec.lua -print -quit)")/." \
+          /usr/lib/crowdsec/lua/; \
+    cp -r "$(dirname "$(find /tmp/bouncer -name ban.html -print -quit)")/." \
+          /var/lib/crowdsec/lua/templates/; \
+    cp "$(find /tmp/bouncer -name crowdsec_nginx.conf -print -quit)" \
+       /usr/share/cs-nginx-bouncer/crowdsec_nginx.conf; \
+    cp "$(find /tmp/bouncer -name crowdsec-nginx-bouncer.conf -print -quit)" \
+       /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
+    rm -rf /tmp/bouncer
+
+# Vendored pure-lua bouncer deps onto LuaJIT's default search path (the
+# CrowdSec snippet's lua_package_path ends with `;;`, which appends this).
+COPY --from=assets /assets/luatree/share/lua/5.1/ /usr/local/share/lua/5.1/
+COPY --from=assets /assets/luatree/lib/lua/5.1/   /usr/local/lib/lua/5.1/
+
 COPY app.ini /etc/nginx-ui/app.ini
 
-# Build-time smoke checks:
-#   * nginx binary symlink works and reports an OpenResty build
-#   * crowdsec lua plugin and HTML templates landed where we expect
-#   * lua-resty-prometheus was installed by opm
+# Build-time guard: load all three modules + require the lua deps + open
+# a VTS zone. Any --with-compat / lua-path / VTS breakage fails HERE.
 RUN set -eux; \
-    /usr/sbin/nginx -v 2>&1 | grep -qi openresty; \
-    test -f /usr/local/openresty/lualib/plugins/crowdsec/crowdsec.lua; \
-    test -f /var/lib/crowdsec/lua/templates/ban.html; \
-    test -f /usr/local/openresty/site/lualib/prometheus.lua; \
-    echo "smoke check OK"
+    MODPATH="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
+    [ -n "$MODPATH" ] || MODPATH=/usr/lib/nginx/modules; \
+    { \
+      echo "load_module $MODPATH/ndk_http_module.so;"; \
+      echo "load_module $MODPATH/ngx_http_lua_module.so;"; \
+      echo "load_module $MODPATH/ngx_http_vhost_traffic_status_module.so;"; \
+      echo "events{}"; \
+      echo "http{ vhost_traffic_status_zone; lua_shared_dict d 1m;"; \
+      echo "      init_by_lua_block { require 'resty.http'; require 'resty.string' } }"; \
+    } > /tmp/probe.conf; \
+    nginx -t -c /tmp/probe.conf; \
+    rm /tmp/probe.conf; \
+    echo "modules load + lua deps resolve — OK"
 
-# Network ports: 80/443 are nginx, 9000 is nginx-ui's web UI, 9113 is the
-# internal Prometheus scrape endpoint (firewalled to RFC1918 inside nginx).
 EXPOSE 80 443 9000 9113
 
-# Do NOT override ENTRYPOINT — s6-overlay /init is inherited from
-# uozi/nginx-ui:latest, which is what registers nginx-ui as a managed
-# service. NGINX_UI_OFFICIAL_DOCKER=true is also inherited from the base
-# and must remain set.
+# ENTRYPOINT (s6 /init) and NGINX_UI_OFFICIAL_DOCKER=true inherited
+# from uozi/nginx-ui.

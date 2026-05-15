@@ -1,11 +1,12 @@
 # buco7854/nginx — homelab reverse-proxy stack
 
-`buco7854/nginx` is `uozi/nginx-ui:latest` with stock nginx replaced by
-OpenResty (LuaJIT built in) so the CrowdSec Lua bouncer can run, plus
-`lua-resty-prometheus` for traffic metrics. This repo also contains a
-ready-to-run `docker-compose.yml` that wires nginx together with CrowdSec
-(engine + web UI), Prometheus, Grafana, and Certwarden into a complete
-reverse-proxy stack.
+`buco7854/nginx` is `uozi/nginx-ui:latest` with two dynamic modules added
+to the stock nginx it ships: Debian's **lua module** (so the CrowdSec Lua
+bouncer can run) and a compiled **nginx-module-vts** (traffic metrics in
+Prometheus format). **No OpenResty** — its apt repo lags Debian releases
+by many months, which is unworkable. This repo also contains a
+ready-to-run `docker-compose.yml` wiring nginx with CrowdSec (engine +
+firewall bouncer + web UI), Prometheus, Grafana, and Certwarden.
 
 ## Image
 
@@ -14,43 +15,44 @@ reverse-proxy stack.
 | `buco7854/nginx:latest`  | this repo's [`Dockerfile`](./Dockerfile) | Weekly Sun 00:00 UTC |
 | `buco7854/nginx:<sha>`   | tagged on every push to `main`           | per-commit            |
 
-Architecture: `uozi/nginx-ui:latest` is the runtime base. s6-overlay (`/init`)
-stays as PID 1 and continues to manage nginx-ui as a service. OpenResty
-binaries are copied in from `crowdsecurity/openresty` (build-stage source
-only, never run as a container) and `/usr/sbin/nginx` is symlinked to the
-OpenResty binary so nginx-ui auto-detects the lua-capable build. The
-Debian release codename is detected from `/etc/os-release` at build time —
-nothing is hardcoded, so the image follows whatever nginx-ui's base
-becomes.
+### Architecture & maintenance posture
 
-OpenResty's compiled-in default config path is
-`/usr/local/openresty/nginx/conf/nginx.conf`. Rather than mess with
-OpenResty's installation directory, the image installs `/usr/sbin/nginx`
-as a tiny wrapper that runs OpenResty with `-c /etc/nginx/nginx.conf`,
-and `app.ini` points `SbinPath` at the wrapper so every nginx-ui call
-(`nginx -t`, `nginx -s reload`, etc.) inherits the flag. nginx parses
-argv left-to-right and the last `-c` wins, so a caller passing its own
-`-c` (e.g. validating a staged config) cleanly overrides ours.
+`uozi/nginx-ui:latest` is the runtime base; its **stock nginx is left
+exactly as-is** (no OpenResty, no binary swap, no wrapper). s6-overlay
+keeps supervising nginx and nginx-ui, and because `/usr/sbin/nginx` is
+the real, unmodified nginx, **nginx-ui auto-detects everything** (sbin
+path, config path, pid path) and its default reload/test/restart
+commands all just work — there is nothing to override in `app.ini`.
+
+Two modules are added as `.so` files baked at `/usr/lib/nginx/modules`
+(outside `/etc/nginx`, so a host bind mount can't hide them; the seed
+`nginx.conf` carries the three `load_module` lines):
+
+| Module | Where it comes from | Update story |
+|---|---|---|
+| `ndk` + `lua` | Debian `libnginx-mod-http-ndk` / `libnginx-mod-http-lua`, fetched from the **same base image** so the release always matches the running nginx. Built `--with-compat` (the ABI contract that lets the module load into nginx.org's nginx). | **Auto-patched by Debian** on every weekly rebuild. |
+| `vts` | Compiled from source against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, in a builder stage on the same base. | Recompiled against whatever nginx ships, **every rebuild** — tracks nginx automatically. |
+| CrowdSec bouncer + `lua-resty-*` | Official `crowdsec-nginx-bouncer` `.deb` (GPG-verified) + pinned luarocks deps. | **Pinned** for reproducibility; bump deliberately. |
+
+The design principle is **fail-loud-at-build, never-silent-in-prod**: a
+build-time `nginx -t` actually loads all three modules and `require`s the
+lua deps. If a future upstream ever breaks `--with-compat` or a path, the
+**weekly build fails** and the last good image keeps running — it never
+ships broken. There is no routine maintenance: Debian patches nginx/lua,
+VTS recompiles itself against the current nginx, and the pinned bits only
+move when you choose to bump an `ARG`.
 
 ### Service monitoring & control
 
-Verified against nginx-ui's
-[service monitoring and control](https://nginxui.com/guide/config-nginx#service-monitoring-and-control)
-behaviour. In the `uozi/nginx-ui` base, nginx is **s6-supervised** (the
-`nginx` longrun service runs `nginx -g "daemon off;"`, which resolves
-via PATH to our wrapper), and nginx-ui runs as a separate s6 service
-that controls it via the `[nginx]` settings in `app.ini`:
-
-| nginx-ui action | Configured via | Result with the wrapper |
-|---|---|---|
-| Status detection | `PIDPath` | Set to `/usr/local/openresty/nginx/logs/nginx.pid`, identical to the `pid` directive in `conf/nginx.conf`. nginx writes that file even under `daemon off;`, so `IsRunning()` is accurate. |
-| Test config | `TestConfigCmd` | `/usr/sbin/nginx -t` → wrapper → `openresty -c /etc/nginx/nginx.conf -t`. |
-| Reload | `ReloadCmd` | `/usr/sbin/nginx -s reload` → wrapper. This is the path Certwarden's cert reload uses. |
-| Restart | `RestartCmd` | **Must be set explicitly.** Left empty, nginx-ui falls back to `start-stop-daemon --start --exec /usr/sbin/nginx`; because the wrapper `exec()`s a different binary, `/proc/PID/exe` never equals `/usr/sbin/nginx`, the `--exec` match fails against the s6-respawned process, and a duplicate start hits a port conflict. We set `RestartCmd = /usr/sbin/nginx -s stop`: nginx stops, s6 immediately respawns it with fresh config — a real restart with no start-stop-daemon involved. |
-
-`PIDPath` in `app.ini` and the `pid` directive in `conf/nginx.conf`
-**must stay in lockstep** — if you change one, change the other, or
-status detection (and the Reload→Restart fallback) breaks.
+Per nginx-ui's
+[service monitoring and control](https://nginxui.com/guide/config-nginx#service-monitoring-and-control):
+because this is the **stock** nginx the `uozi/nginx-ui` base was built
+for, every code path works with nginx-ui's auto-detected defaults — no
+`app.ini` overrides, no wrapper, no `PIDPath`/`RestartCmd` juggling.
+Status detection (`/var/run/nginx.pid`), `nginx -t`, `nginx -s reload`
+(the Certwarden cert-reload path), and the `start-stop-daemon` restart
+all behave exactly as upstream intends, since `/usr/sbin/nginx` is the
+real binary.
 
 ## Stack overview
 
@@ -60,8 +62,8 @@ status detection (and the Reload→Restart fallback) breaks.
                    ▼
 ┌─────────────────────────────────────────────────────┐
 │  nginx (buco7854/nginx)                             │
-│  OpenResty + CrowdSec lua bouncer (incl. AppSec)    │
-│  + nginx-ui                                         │
+│  stock nginx + lua module (CrowdSec bouncer,        │
+│  incl. AppSec) + VTS metrics + nginx-ui             │
 └──┬───────────────┬──────────────┬───────────────────┘
    │ access/error  │ AppSec WAF   │ /metrics :9113
    ▼               ▼              ▼
@@ -147,7 +149,8 @@ dirs next to `docker-compose.yml` — all gitignored.
    (Run with the same values as your `.env`, or export them first.)
 6. **Open the UIs.**
    - nginx-ui — http://localhost (served on port 80 via the proxy itself)
-   - Grafana — http://localhost:3001 (import dashboard ID `10442`)
+   - Grafana — http://localhost:3001 (import dashboard ID `2949`,
+     "Nginx VTS Stats", which matches the VTS Prometheus metrics)
    - CrowdSec web UI — http://localhost:9321
 
 ## Certwarden integration
@@ -198,9 +201,9 @@ The Debian layout is preserved — `conf.d/`, `sites-available/`,
 they did on a bare-metal Debian host. To migrate:
 
 - **Drop your existing tree into `/etc/nginx/`.** Don't merge —
-  literally copy the directory.
-- **Remove `load_module ...` lines.** OpenResty has Lua built in; no
-  dynamic modules to load.
+  literally copy the directory. Keep the three `load_module` lines from
+  the seed `nginx.conf` at the very top (ndk → lua → vts); the bouncer
+  and metrics depend on them. Don't add your own lua/vts `load_module`.
 - **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
 - **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
   change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
@@ -234,9 +237,11 @@ docker compose up -d
 ```
 
 The GitHub Actions workflow rebuilds and pushes `buco7854/nginx:latest`
-every Sunday at 00:00 UTC, picking up upstream changes to
-`uozi/nginx-ui:latest`, `crowdsecurity/openresty:latest`, and the
-underlying Debian base.
+every Sunday at 00:00 UTC, picking up `uozi/nginx-ui:latest`, Debian
+security patches for nginx and the lua module, and recompiling VTS
+against whatever nginx version ships. If an upstream change ever breaks
+compatibility the build fails (the last good image keeps running) — so
+"upgrading" is just `docker compose pull && docker compose up -d`.
 
 ## Folder layout
 
@@ -247,14 +252,14 @@ in the repo root.
 
 ```
 nginx/
-├── Dockerfile                # buco7854/nginx image
-├── app.ini                   # default nginx-ui config baked into the image
-├── nginx-wrapper.sh          # /usr/sbin/nginx wrapper that adds -c /etc/nginx/nginx.conf
+├── Dockerfile                # buco7854/nginx image (stock nginx + lua + vts)
+├── app.ini                   # minimal nginx-ui config baked into the image
 ├── docker-compose.yml        # full homelab stack
 ├── .env.example              # template — copy to .env (gitignored)
 ├── conf/                     # seed config — copy to /etc/nginx/ on the host
-│   ├── nginx.conf
-│   ├── conf.d/{01-crowdsec.conf, 06-ratelimit.conf}
+│   ├── nginx.conf            # carries the 3 load_module lines + VTS /metrics
+│   ├── mime.types
+│   ├── conf.d/06-ratelimit.conf
 │   ├── snippets/{ratelimit.conf, security-txt.conf}
 │   └── server-conf.d/.gitkeep
 ├── crowdsec/
