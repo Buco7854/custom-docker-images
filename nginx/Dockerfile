@@ -82,6 +82,11 @@ RUN set -eux; \
     # guard catches any breakage.
     luarocks install lua-resty-http   --tree=/assets/luatree; \
     luarocks install lua-resty-string --tree=/assets/luatree; \
+    # Both are pure-lua: luarocks only populates share/lua/5.1 (no C
+    # modules, so it never creates lib/lua/5.1). Pre-create it so the
+    # final stage's COPY of the C-module search path is a no-op instead
+    # of failing, and still carries a .so if a dep ever ships one.
+    mkdir -p /assets/luatree/lib/lua/5.1; \
     \
     # Guard: bouncer .deb must stay pure lua/config (no ELF binaries).
     if find /assets/bouncer -type f -exec sh -c 'head -c4 "$1"|grep -q ELF' _ {} \; -print | grep -q .; then \
