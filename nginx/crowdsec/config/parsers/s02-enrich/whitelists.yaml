@@ -1,0 +1,25 @@
+# CrowdSec parser-stage whitelist.
+#
+# Runs in s02-enrich, so it applies BEFORE any scenario can produce an
+# alert — matched events get dropped silently. Also affects AppSec since
+# AppSec events flow through the same parser pipeline.
+#
+# Docs: https://docs.crowdsec.net/docs/whitelist/intro/
+# Reload after editing:  docker compose restart crowdsec
+
+name: my/whitelists
+description: "Local whitelists — trusted sources never bounced"
+whitelist:
+  reason: "trusted sources"
+  ip:
+    - 127.0.0.1
+    - ::1
+  cidr:
+    # Docker bridge networks (so internal probes don't trip rules).
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    # - 10.0.0.0/8                # uncomment if you trust the full RFC1918
+  # Use expressions for richer rules — see CrowdSec docs.
+  # expression:
+  #   - evt.Meta.source_ip == '203.0.113.42'
+  #   - "evt.Parsed.request startsWith '/healthz'"

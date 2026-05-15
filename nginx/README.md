@@ -35,38 +35,52 @@ argv left-to-right and the last `-c` wins, so a caller passing its own
 ## Stack overview
 
 ```
-Internet
-    │ 80/443
-    ▼
+                Internet
+                   │ 80/443
+                   ▼
 ┌─────────────────────────────────────────────────────┐
 │  nginx (buco7854/nginx)                             │
-│  OpenResty + CrowdSec Lua bouncer + nginx-ui        │
-│  nginx-ui web UI accessible via port 80             │
-└──────┬──────────────┬───────────────────────────────┘
-       │              │
-       │ logs         │ /metrics :9113
-       ▼              ▼
-┌──────────┐    ┌────────────┐
-│ crowdsec │    │ prometheus │──── grafana :3001
-│ LAPI     │    └────────────┘
-│ :8080    │
-└────┬─────┘
-     │
-     ▼
-┌──────────────┐
-│ crowdsec-ui  │
-│ :3000        │
-└──────────────┘
+│  OpenResty + CrowdSec lua bouncer (incl. AppSec)    │
+│  + nginx-ui                                         │
+└──┬───────────────┬──────────────┬───────────────────┘
+   │ access/error  │ AppSec WAF   │ /metrics :9113
+   ▼               ▼              ▼
+┌─────────────────────────┐  ┌────────────┐
+│ crowdsec  LAPI  :8080   │  │ prometheus │──── grafana :3001
+│           AppSec :7422  │  └────────────┘
+└──┬──────────────┬───────┘
+   │ decisions    │ alerts
+   ▼              ▼
+┌─────────────┐  ┌──────────────┐
+│ firewall    │  │ crowdsec-ui  │
+│ bouncer     │  │ :3000        │
+│ (iptables)  │  └──────────────┘
+└─────────────┘
 
-certwarden :4055 ──writes certs──▶ ./ssl/
+certwarden :4055 ──writes certs──▶ /etc/ssl/domains/
                  ──POST reload──▶  nginx /api/nginx/reload
 ```
 
 Everything except 80/443 binds to `127.0.0.1` only — nothing on the LAN
 can talk to LAPI, Grafana, the CrowdSec UI, Prometheus, or Certwarden's
-admin port. All services share the `proxy_net` bridge network, so they
-resolve each other by service name (`nginx`, `crowdsec`, `prometheus`,
-etc.).
+admin port. All services share the `proxy_net` bridge network and
+resolve each other by service name — except the firewall bouncer, which
+runs with `network_mode: host` so it can rewrite iptables, and reaches
+LAPI via the loopback-published `127.0.0.1:8080`.
+
+### Host paths
+
+The nginx container uses **absolute Debian-style paths**, bind-mounted
+from the host:
+
+| Container          | Host                | Owner                              |
+|--------------------|---------------------|------------------------------------|
+| `/etc/nginx`       | `/etc/nginx`        | you — drop your config here        |
+| `/var/log/nginx`   | `/var/log/nginx`    | nginx writes, crowdsec reads (RO)  |
+| `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes, nginx reads (RO)|
+
+Everything else (nginx-ui state, www files, crowdsec data, prometheus
+volume, etc.) stays in relative dirs next to `docker-compose.yml`.
 
 ## First-time setup
 
@@ -75,38 +89,31 @@ etc.).
    git clone https://github.com/buco7854/custom-docker-images
    cd custom-docker-images/nginx
    cp .env.example .env
-   $EDITOR .env
+   $EDITOR .env                # fills in CROWDSEC_*_API_KEY, NGINX_UI_API_KEY, etc.
    ```
-2. **Drop in your existing nginx config.** Copy your Debian-style tree
-   (`sites-available/`, `sites-enabled/`, plus any custom files) into
-   `./conf/` next to the seed `nginx.conf`. The structure is
-   preserved 1:1.
-3. **Seed certs.** Either drop existing cert pairs into
-   `./ssl/<domain>/{fullchain,privkey}.pem`, or let Certwarden write
-   them on first issuance.
-4. **Match the API keys.** Edit `nginx-ui/app.ini` (created on first
-   start) so that `[auth] ApiKey` matches `NGINX_UI_API_KEY` in `.env`.
-   Edit `crowdsec/bouncer.conf` so `API_KEY` matches
-   `CROWDSEC_BOUNCER_API_KEY` in `.env`.
-5. **Bring it up.**
+2. **Seed the host directories from the repo.**
+   ```bash
+   sudo cp -rn conf/. /etc/nginx/
+   sudo mkdir -p /var/log/nginx /etc/ssl/domains
+   ```
+   Drop your existing Debian-style tree (`sites-available/`,
+   `sites-enabled/`, plus any custom files) into `/etc/nginx/` —
+   structure is preserved 1:1.
+3. **Match the API keys in the bouncer config files.**
+   ```bash
+   $EDITOR crowdsec/bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
+   $EDITOR crowdsec/firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
+   $EDITOR nginx-ui/app.ini                 # [auth] ApiKey = NGINX_UI_API_KEY (after first start)
+   ```
+4. **Bring it up.**
    ```bash
    docker compose up -d
    ```
-   The `BOUNCER_KEY_nginx` env var on the CrowdSec service auto-registers
-   that bouncer key on first start, so the nginx bouncer authenticates
-   immediately.
-6. **Generate the web-UI bouncer key.**
-   ```bash
-   docker compose exec crowdsec cscli bouncers add crowdsec-web-ui
-   ```
-   Paste the key into `.env` as `CROWDSEC_WEB_UI_API_KEY`, then:
-   ```bash
-   docker compose restart crowdsec-ui
-   ```
-7. **Open the UIs.**
+   The `BOUNCER_KEY_*` env vars on the CrowdSec service auto-register
+   all three bouncer keys on first start.
+5. **Open the UIs.**
    - nginx-ui — http://localhost (served on port 80 via the proxy itself)
-   - Grafana — http://localhost:3001 (import dashboard ID `10442` for
-     nginx metrics)
+   - Grafana — http://localhost:3001 (import dashboard ID `10442`)
    - CrowdSec web UI — http://localhost:3000
 
 ## Certwarden integration
@@ -126,10 +133,28 @@ The script expects these env vars (which Certwarden passes, plus
 | `NGINX_UI_API_KEY`| `.env`                                |
 
 The hook writes `fullchain.pem` and `privkey.pem` under
-`/etc/ssl/domains/<CERTIFICATE_NAME>/` (which is `./ssl/` on the host,
-bind-mounted into nginx read-only) and then `POST`s
+`/etc/ssl/domains/<CERTIFICATE_NAME>/` (which is `/etc/ssl/domains/` on
+the host, bind-mounted into nginx read-only) and then `POST`s
 `http://nginx/api/nginx/reload` with the `X-API-Key` header to trigger
 `nginx -s reload`.
+
+## CrowdSec whitelists
+
+Two whitelist files ship in the seed config:
+
+- **`crowdsec/config/parsers/s02-enrich/whitelists.yaml`** — runs in the
+  parser stage, so it short-circuits BOTH log-based scenarios AND
+  AppSec events. Use it for trusted IP/CIDR sources.
+- **`crowdsec/config/appsec-rules/whitelists.yaml`** — AppSec-specific
+  custom rules (e.g. skip the WAF for `/healthz`). Add `my/...` rules
+  here and reference them from an appsec-config override if you need
+  the rule list to extend the default one.
+
+Reload after editing either file:
+
+```bash
+docker compose restart crowdsec
+```
 
 ## Nginx config migration
 
@@ -137,7 +162,7 @@ The Debian layout is preserved — `conf.d/`, `sites-available/`,
 `sites-enabled/`, `server-conf.d/`, and `snippets/` all work exactly as
 they did on a bare-metal Debian host. To migrate:
 
-- **Drop your existing tree into `./conf/`.** Don't merge —
+- **Drop your existing tree into `/etc/nginx/`.** Don't merge —
   literally copy the directory.
 - **Remove `load_module ...` lines.** OpenResty has Lua built in; no
   dynamic modules to load.
@@ -189,16 +214,21 @@ in the repo root.
 nginx/
 ├── Dockerfile                # buco7854/nginx image
 ├── app.ini                   # default nginx-ui config baked into the image
+├── nginx-wrapper.sh          # /usr/sbin/nginx wrapper that adds -c /etc/nginx/nginx.conf
 ├── docker-compose.yml        # full homelab stack
 ├── .env.example
-├── conf/                     # bind-mounted to /etc/nginx in the container
+├── conf/                     # seed config — copy to /etc/nginx/ on the host
 │   ├── nginx.conf
 │   ├── conf.d/{01-crowdsec.conf, 06-ratelimit.conf}
 │   ├── snippets/{ratelimit.conf, security-txt.conf}
 │   └── server-conf.d/.gitkeep
 ├── crowdsec/
-│   ├── bouncer.conf
-│   └── config/acquis.yaml
+│   ├── bouncer.conf                       # nginx Lua bouncer (mounted into nginx)
+│   ├── firewall-bouncer.yaml              # firewall bouncer (mounted into firewall-bouncer)
+│   └── config/                            # mounted into the crowdsec container
+│       ├── acquis.yaml                    # nginx logs + AppSec listener
+│       ├── parsers/s02-enrich/whitelists.yaml
+│       └── appsec-rules/whitelists.yaml
 ├── prometheus/prometheus.yml
 ├── grafana/provisioning/{datasources, dashboards}
 ├── www/well-known/security.txt

@@ -1,14 +1,24 @@
 # Homelab reverse-proxy stack:
-#   nginx (buco7854/nginx) — OpenResty + nginx-ui + CrowdSec lua bouncer
-#   crowdsec               — LAPI reading nginx logs
-#   crowdsec-ui            — web UI for alerts/decisions
-#   prometheus             — scrapes nginx :9113 + crowdsec :6060
-#   grafana                — dashboards on top of prometheus
-#   certwarden             — Let's Encrypt cert manager; writes to ./ssl
-#                            and reloads nginx via nginx-ui's reload API
+#   nginx                      — OpenResty + nginx-ui + CrowdSec lua bouncer
+#   crowdsec                   — LAPI reading nginx logs + AppSec (WAF)
+#   crowdsec-firewall-bouncer  — applies LAPI decisions to host iptables
+#   crowdsec-ui                — web UI for alerts/decisions
+#   prometheus                 — scrapes nginx :9113 + crowdsec :6060
+#   grafana                    — dashboards on top of prometheus
+#   certwarden                 — Let's Encrypt cert manager
 #
-# All services share the `proxy_net` bridge network. Non-web ports are bound
-# to 127.0.0.1 only so nothing except 80/443 is reachable from the LAN.
+# All services share `proxy_net` (except the firewall bouncer, which uses
+# host networking so it can touch iptables). Non-web ports bind to
+# 127.0.0.1 only so nothing except 80/443 leaks onto the LAN.
+#
+# Host paths (canonical Debian layout):
+#   /etc/nginx           nginx config (bind-mounted into the nginx container)
+#   /var/log/nginx       access/error logs (RW for nginx, RO for crowdsec)
+#   /etc/ssl/domains     SSL certs (RW for certwarden, RO for nginx)
+#
+# Seed configs from this repo (one-time):
+#   sudo cp -rn nginx/conf/. /etc/nginx/
+#   sudo mkdir -p /var/log/nginx /etc/ssl/domains
 
 services:
 
@@ -20,12 +30,12 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/conf:/etc/nginx                                  # Debian-style nginx config
-      - ./nginx/logs:/var/log/nginx                              # logs (shared RO with crowdsec)
-      - ./nginx-ui:/etc/nginx-ui                                 # nginx-ui sqlite DB + app.ini
-      - ./ssl:/etc/ssl/domains:ro                                # certs written by certwarden
+      - /etc/nginx:/etc/nginx
+      - /var/log/nginx:/var/log/nginx
+      - /etc/ssl/domains:/etc/ssl/domains:ro
+      - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
       - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-openresty-bouncer.conf
-      - ./www:/var/www                                           # static files (security.txt etc.)
+      - ./www:/var/www                                            # static files (security.txt etc.)
     environment:
       - TZ=${TZ}
     networks:
@@ -38,15 +48,35 @@ services:
     volumes:
       - ./crowdsec/config:/etc/crowdsec
       - ./crowdsec/data:/var/lib/crowdsec/data
-      - ./nginx/logs:/var/log/nginx:ro
+      - /var/log/nginx:/var/log/nginx:ro
     environment:
       - TZ=${TZ}
-      - COLLECTIONS=crowdsecurity/nginx
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
       - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
+      - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
+      - BOUNCER_KEY_webui=${CROWDSEC_WEB_UI_API_KEY}
     ports:
-      - "127.0.0.1:8080:8080"     # LAPI — loopback only
+      - "127.0.0.1:8080:8080"      # LAPI — loopback (firewall bouncer uses this over host net)
+    expose:
+      - "7422"                     # AppSec listener — compose net only
     networks:
       - proxy_net
+
+  crowdsec-firewall-bouncer:
+    image: crowdsecurity/crowdsec-firewall-bouncer:latest
+    container_name: crowdsec-firewall-bouncer
+    restart: unless-stopped
+    # host network so we can write iptables on the host — the bouncer
+    # reaches LAPI via 127.0.0.1:8080 (published above by the crowdsec
+    # service on loopback).
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./crowdsec/firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+    depends_on:
+      - crowdsec
 
   crowdsec-ui:
     image: ghcr.io/theduffman85/crowdsec-web-ui:latest
@@ -98,8 +128,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./certwarden:/app/data
-      - ./ssl:/etc/ssl/domains              # writes certs here (RW)
-      - ./scripts:/scripts:ro               # post-issuance hook lives here
+      - /etc/ssl/domains:/etc/ssl/domains                # writes certs here (RW)
+      - ./scripts:/scripts:ro                            # post-issuance hook lives here
     ports:
       - "127.0.0.1:4055:4055"
     networks:
