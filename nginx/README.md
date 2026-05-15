@@ -14,8 +14,8 @@ CrowdSec has its own web UI.
 
 | Image | Source | Schedule |
 |-------|--------|----------|
-| `buco7854/nginx:latest`  | this repo's [`Dockerfile`](./Dockerfile) | Weekly Sun 00:00 UTC |
-| `buco7854/nginx:<sha>`   | tagged on every push to `main`           | per-commit            |
+| `ghcr.io/buco7854/nginx:latest`  | this repo's [`Dockerfile`](./Dockerfile) | Weekly Sun 00:00 UTC |
+| `ghcr.io/buco7854/nginx:<sha>`   | tagged on every push to `main`           | per-commit            |
 
 ### Architecture & maintenance posture
 
@@ -303,7 +303,7 @@ docker compose pull
 docker compose up -d
 ```
 
-The GitHub Actions workflow rebuilds and pushes `buco7854/nginx:latest`
+The GitHub Actions workflow rebuilds and pushes `ghcr.io/buco7854/nginx:latest`
 every Sunday at 00:00 UTC, picking up `uozi/nginx-ui:latest`, Debian
 security patches for nginx and the lua module, and recompiling VTS
 against whatever nginx version ships. If an upstream change ever breaks
@@ -314,7 +314,7 @@ compatibility the build fails (the last good image keeps running) — so
 
 This image and its compose example live in `nginx/` inside the
 [`buco7854/custom-docker-images`](https://github.com/buco7854/custom-docker-images)
-repo. The workflow that builds it is at `.github/workflows/docker-publish.yml`
+repo. The workflow that builds it is at `.github/workflows/build-nginx.yml`
 in the repo root.
 
 ```
