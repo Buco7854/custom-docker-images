@@ -39,7 +39,7 @@ services:
       - /var/log/nginx:/var/log/nginx
       - /etc/ssl/domains:/etc/ssl/domains:ro
       - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
-      - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+      - ./crowdsec_bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
       - ./www:/var/www                                            # static files (security.txt etc.)
     environment:
       - TZ=${TZ}
@@ -51,8 +51,8 @@ services:
     container_name: crowdsec
     restart: unless-stopped
     volumes:
-      - ./crowdsec/config:/etc/crowdsec
-      - ./crowdsec/data:/var/lib/crowdsec/data
+      - ./crowdsec_config:/etc/crowdsec              # config: authored files + hub installs (bind)
+      - ./crowdsec_data:/var/lib/crowdsec/data       # runtime state DB: LAPI decisions/alerts (bind)
       - /var/log/nginx:/var/log/nginx:ro
     environment:
       - TZ=${TZ}
@@ -62,7 +62,7 @@ services:
       # driven by THIS stack's acquis (nginx logs + the AppSec listener).
       # linux/sshd/synology-dsm are kept to mirror the reference box but
       # stay INERT here until you add their log sources to
-      # crowdsec/config/acquis.yaml. appsec-crs/-wordpress rules install
+      # crowdsec_config/acquis.yaml. appsec-crs/-wordpress rules install
       # but only the appsec-default inband set (base-config + vpatch-* +
       # generic-*) is active, since acquis.yaml keeps the stock
       # crowdsecurity/appsec-default config.
@@ -88,7 +88,7 @@ services:
       - NET_ADMIN
       - NET_RAW
     volumes:
-      - ./crowdsec/firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+      - ./crowdsec_firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
     depends_on:
       - crowdsec
 

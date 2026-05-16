@@ -174,9 +174,13 @@ from the host:
 | `/var/log/nginx`   | `/var/log/nginx`    | nginx writes, crowdsec reads (RO)  |
 | `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes (via its `/certs` mount), nginx reads (RO)|
 
-Everything else (nginx-ui state, www files, crowdsec data, web-ui data,
-certwarden data) stays in relative bind-mount dirs next to
-`docker-compose.yml` — all gitignored.
+CrowdSec uses two flat bind dirs next to `docker-compose.yml`:
+`crowdsec_config/` (version-controlled — acquis, whitelists,
+appsec-config; hub-installed collections also land here at runtime) and
+`crowdsec_data/` (runtime LAPI state DB — gitignored). Everything else
+(nginx-ui state, www files, web-ui data, certwarden data) likewise
+stays in relative bind-mount dirs next to `docker-compose.yml` — all
+gitignored.
 
 ## First-time setup
 
@@ -199,8 +203,8 @@ certwarden data) stays in relative bind-mount dirs next to
    [Required for the integration to work](#required-for-the-integration-to-work)).
 3. **Match the API keys in the bouncer config files.**
    ```bash
-   $EDITOR crowdsec/bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
-   $EDITOR crowdsec/firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
+   $EDITOR crowdsec_bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
+   $EDITOR crowdsec_firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
    $EDITOR nginx-ui/app.ini                 # [auth] ApiKey = NGINX_UI_API_KEY (after first start)
    ```
 4. **Bring it up.**
@@ -249,15 +253,21 @@ back read-only at `/etc/ssl/domains`. It then `POST`s
 
 ## CrowdSec whitelists
 
-Two whitelist files ship in the seed config:
+Whitelists ship version-controlled in `crowdsec_config/`:
 
-- **`crowdsec/config/parsers/s02-enrich/whitelists.yaml`** — runs in the
-  parser stage, so it short-circuits BOTH log-based scenarios AND
-  AppSec events. Use it for trusted IP/CIDR sources.
-- **`crowdsec/config/appsec-rules/whitelists.yaml`** — AppSec-specific
-  custom rules (e.g. skip the WAF for `/healthz`). Add `my/...` rules
-  here and reference them from an appsec-config override if you need
-  the rule list to extend the default one.
+- **`crowdsec_config/parsers/s02-enrich/whitelists.yaml`** (`my/whitelists`)
+  — runs in the parser stage, so it short-circuits BOTH log-based
+  scenarios AND AppSec events. Use it for trusted IP/CIDR sources.
+  Active automatically (parser whitelists need no wiring).
+- **`crowdsec_config/appsec-rules/whitelists.yaml`** (`my/appsec-whitelists`)
+  — AppSec-specific allowlist rules (e.g. skip the WAF for `/healthz`).
+  **Active**: `crowdsec_config/appsec-configs/appsec-custom.yaml`
+  (`my/appsec-config`) lists `my/appsec-whitelists` in its in-band
+  rules, and `acquis.yaml`'s `appsec_config:` points at it. It mirrors
+  the stock `crowdsecurity/appsec-default` rule set, so the WAF is
+  unchanged apart from your added allowlist rules. Add more `my/...`
+  rules to the file; add their names to `appsec-custom.yaml` if you
+  create separate rule files.
 
 Reload after editing either file:
 
@@ -344,13 +354,14 @@ nginx/
 │   └── optional/             # NOT seeded — opt-in examples (see README)
 │       ├── conf.d/ratelimit.conf
 │       └── snippets/{ratelimit.conf, security-txt.conf}
-├── crowdsec/
-│   ├── bouncer.conf                       # nginx Lua bouncer (mounted into nginx)
-│   ├── firewall-bouncer.yaml              # firewall bouncer (mounted into firewall-bouncer)
-│   └── config/                            # mounted into the crowdsec container
-│       ├── acquis.yaml                    # nginx logs + AppSec listener
-│       ├── parsers/s02-enrich/whitelists.yaml
-│       └── appsec-rules/whitelists.yaml
+├── crowdsec_bouncer.conf                  # nginx Lua bouncer (mounted into nginx)
+├── crowdsec_firewall-bouncer.yaml         # firewall bouncer (mounted into firewall-bouncer)
+├── crowdsec_config/                       # mounted into the crowdsec container (/etc/crowdsec)
+│   ├── acquis.yaml                        # nginx logs + AppSec listener
+│   ├── appsec-configs/appsec-custom.yaml  # my/appsec-config (default rules + my whitelists)
+│   ├── appsec-rules/whitelists.yaml       # my/appsec-whitelists
+│   └── parsers/s02-enrich/whitelists.yaml # my/whitelists
+│                                          # crowdsec_data/ = runtime LAPI state (gitignored)
 ├── www/well-known/security.txt
 └── scripts/{write_cert.sh, maintenance_nginx_ui.sh}
 ```

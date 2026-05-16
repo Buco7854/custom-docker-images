@@ -6,7 +6,7 @@
 
 # Runtime/state dirs created by the compose stack
 nginx/nginx-ui/
-nginx/crowdsec/data/
+nginx/crowdsec_data/
 nginx/crowdsec-web-ui/
 nginx/certwarden/data/
 nginx/prometheus/data/
