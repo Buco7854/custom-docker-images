@@ -1,10 +1,15 @@
 # buco7854/nginx — homelab reverse-proxy stack
 
-`buco7854/nginx` is `uozi/nginx-ui:latest` with two dynamic modules added
-to the stock nginx it ships: Debian's **lua module** (so the CrowdSec Lua
-bouncer can run) and a compiled **nginx-module-vts** that serves a custom
-interactive **HTML dashboard** (no Prometheus output). **No OpenResty** —
-its apt repo lags Debian releases by many months, which is unworkable.
+`buco7854/nginx` is `uozi/nginx-ui:latest` with dynamic modules added to
+the stock nginx it ships: a **lua module stack** (LuaJIT +
+lua-nginx-module, so the CrowdSec Lua bouncer can run) and
+**nginx-module-vts** that serves a custom interactive **HTML dashboard**
+(no Prometheus output). Both are **compiled from source against the exact
+nginx version uozi ships**. **No OpenResty** (its apt repo lags Debian by
+many months) and **no Debian `libnginx-mod-*`** either — uozi ships
+nginx.org *mainline*, Debian's modules target Debian's much older nginx,
+and nginx's dynamic-module version check is exact (`--with-compat` does
+not relax it), so a Debian module simply refuses to load.
 This repo also contains a ready-to-run `docker-compose.yml` wiring nginx
 with CrowdSec (engine + firewall bouncer + web UI) and Certwarden. No
 Prometheus/Grafana — nginx traffic is the VTS HTML dashboard and
@@ -33,18 +38,23 @@ config layout below):
 
 | Module | Where it comes from | Update story |
 |---|---|---|
-| `ndk` + `lua` | Debian `libnginx-mod-http-ndk` / `libnginx-mod-http-lua`, fetched from the **same base image** so the release always matches the running nginx. Built `--with-compat` (the ABI contract that lets the module load into nginx.org's nginx). | **Auto-patched by Debian** on every weekly rebuild. |
+| `ndk` + `lua` | LuaJIT (`openresty/luajit2`) + `ngx_devel_kit` + `lua-nginx-module`, compiled from **latest** upstream (default branch) against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, on the same base. `lua-resty-core`/`-lrucache` (mandatory for modern lua-nginx-module) are vendored from the same default branch so they always match. | Recompiled against the current nginx every weekly rebuild; tracks nginx automatically. The set moves together on upstream's default branches. Pin a one-off with the matching `--build-arg <NAME>_REF=<tag>` (`LUAJIT2_REF`, `NDK_REF`, `LUA_NGINX_MODULE_REF`, `LUA_RESTY_CORE_REF`, `LUA_RESTY_LRUCACHE_REF`). |
 | `vts` | Compiled from **latest** upstream (default branch) against the **exact** nginx version uozi ships (detected from `nginx -v`), `--with-compat`, on the same base. The custom dashboard is baked in via VTS's `tplToDefine.sh`. | Tracks nginx automatically every rebuild; VTS upstream fixes nginx-compat on that branch first. Pin a one-off with `--build-arg VTS_REF=<tag>`. |
 | CrowdSec bouncer | Official `crowdsec-nginx-bouncer` `.deb` (GPG-verified); files land at the exact baremetal `apt` paths. | Pinnable via `--build-arg CS_NGINX_BOUNCER_VERSION`; otherwise tracks the repo's current. |
 | `lua-resty-http` / `-string` | Tiny pure-lua libs the bouncer needs, not in Debian — installed **latest** via luarocks (same as you'd do by hand on baremetal plain nginx). | Unpinned; the build-time `nginx -t` guard catches breakage. |
 
 The design principle is **fail-loud-at-build, never-silent-in-prod**: a
-build-time `nginx -t` actually loads all three modules and `require`s the
-lua deps. If a future upstream ever breaks `--with-compat` or a path, the
-**weekly build fails** and the last good image keeps running — it never
-ships broken. There is no routine maintenance: Debian patches nginx/lua,
-VTS recompiles itself against the current nginx, and the pinned bits only
-move when you choose to bump an `ARG`.
+build-time `nginx -t` loads all three modules and runs an `init_by_lua`
+that `require`s the bouncer's lua deps. `init_by_lua` forces
+lua-nginx-module to load `resty.core` (mandatory — it aborts if missing),
+so that single check validates the whole stack: the exact
+nginx↔module version match, `--with-compat`, LuaJIT, the lua path, and
+`resty.core`/`http`/`string`/`cjson` all resolving. If a future upstream
+ever breaks any of that, the **weekly build fails** and the last good
+image keeps running — it never ships broken. There is no routine
+maintenance: the lua stack and VTS recompile themselves against the
+current nginx every rebuild, and the pinned bits only move when you
+choose to bump an `ARG`.
 
 ### Config layout — seed-if-empty, never clobber
 
@@ -304,11 +314,11 @@ docker compose up -d
 ```
 
 The GitHub Actions workflow rebuilds and pushes `ghcr.io/buco7854/nginx:latest`
-every Sunday at 00:00 UTC, picking up `uozi/nginx-ui:latest`, Debian
-security patches for nginx and the lua module, and recompiling VTS
-against whatever nginx version ships. If an upstream change ever breaks
-compatibility the build fails (the last good image keeps running) — so
-"upgrading" is just `docker compose pull && docker compose up -d`.
+every Sunday at 00:00 UTC, picking up `uozi/nginx-ui:latest` (including
+whatever nginx version it ships) and recompiling the lua stack + VTS
+against it. If an upstream change ever breaks compatibility the build
+fails (the last good image keeps running) — so "upgrading" is just
+`docker compose pull && docker compose up -d`.
 
 ## Folder layout
 
