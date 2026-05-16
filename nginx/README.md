@@ -10,10 +10,31 @@ many months) and **no Debian `libnginx-mod-*`** either — uozi ships
 nginx.org *mainline*, Debian's modules target Debian's much older nginx,
 and nginx's dynamic-module version check is exact (`--with-compat` does
 not relax it), so a Debian module simply refuses to load.
+
 This repo also contains a ready-to-run `docker-compose.yml` wiring nginx
 with CrowdSec (engine + firewall bouncer + web UI) and Certwarden. No
 Prometheus/Grafana — nginx traffic is the VTS HTML dashboard and
 CrowdSec has its own web UI.
+
+## Contents
+
+- [Image](#image)
+- [Setup](#setup)
+  - [Prerequisites](#prerequisites)
+  - [Path A — fresh install](#path-a--fresh-install)
+  - [Path B — migrate an existing install](#path-b--migrate-an-existing-install)
+  - [Open the UIs](#open-the-uis)
+- [How it works](#how-it-works)
+  - [Architecture & maintenance posture](#architecture--maintenance-posture)
+  - [Config layout — seed-if-empty, never clobber](#config-layout--seed-if-empty-never-clobber)
+  - [Stack overview](#stack-overview)
+  - [Host paths](#host-paths)
+  - [Service monitoring & control](#service-monitoring--control)
+- [Certwarden integration](#certwarden-integration)
+- [CrowdSec whitelists](#crowdsec-whitelists)
+- [Maintenance script](#maintenance-script)
+- [Upgrading](#upgrading)
+- [Folder layout](#folder-layout)
 
 ## Image
 
@@ -21,6 +42,197 @@ CrowdSec has its own web UI.
 |-------|--------|----------|
 | `ghcr.io/buco7854/nginx:latest`  | this repo's [`Dockerfile`](./Dockerfile) | Weekly Sun 00:00 UTC |
 | `ghcr.io/buco7854/nginx:<sha>`   | tagged on every push to `main`           | per-commit            |
+
+## Setup
+
+Two ways in:
+
+- **[Path A — fresh install](#path-a--fresh-install)** — a clean machine,
+  nothing to keep. The container seeds a working config for you.
+- **[Path B — migrate an existing install](#path-b--migrate-an-existing-install)**
+  — you already run nginx and/or CrowdSec (bare metal or another compose)
+  and want to bring that config in.
+
+Both finish at [Open the UIs](#open-the-uis). Do the
+[Prerequisites](#prerequisites) first either way.
+
+### Prerequisites
+
+- Docker + Docker Compose v2.
+- Ports `80`/`443` free on the host (everything else binds to
+  `127.0.0.1` only).
+- Create the host dirs (the nginx container uses absolute Debian-style
+  paths — see [Host paths](#host-paths)):
+  ```bash
+  sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
+  ```
+- Clone the repo and fill in a `.env`:
+  ```bash
+  git clone https://github.com/buco7854/custom-docker-images
+  cd custom-docker-images/nginx
+  cp .env.example .env
+  $EDITOR .env                # .env is gitignored — put real secrets here
+  ```
+  Pick long random strings for the two bouncer keys
+  (`openssl rand -hex 32`) and a long `CROWDSEC_UI_PASSWORD`.
+
+### Path A — fresh install
+
+Leave `/etc/nginx` **empty** — on first start the container seeds the
+default nginx + nginx-ui + CrowdSec bouncer + VTS config into it.
+
+1. **Match the bouncer API keys.** The same value must appear on both
+   sides — the `.env` var and the bouncer-side config file:
+   ```bash
+   $EDITOR crowdsec_bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
+   $EDITOR crowdsec_firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
+   ```
+2. **Bring it up.**
+   ```bash
+   docker compose up -d
+   ```
+   The `BOUNCER_KEY_*` env vars on the CrowdSec service auto-register
+   both bouncer keys on first start.
+3. **Set the nginx-ui reload key.** `nginx-ui/app.ini` exists after the
+   first start — set its `[auth] ApiKey` to your `.env`'s
+   `NGINX_UI_API_KEY` (Certwarden uses it to trigger reloads), then
+   reload it:
+   ```bash
+   $EDITOR nginx-ui/app.ini                 # [auth] ApiKey = NGINX_UI_API_KEY
+   docker compose restart nginx
+   ```
+4. **Register the web-UI machine account.** The CrowdSec web UI
+   authenticates to LAPI with **machine credentials** (not a bouncer
+   key), and the crowdsec image does not auto-register machines:
+   ```bash
+   docker compose exec crowdsec \
+     cscli machines add "$CROWDSEC_UI_USER" --password "$CROWDSEC_UI_PASSWORD" -f /dev/null
+   docker compose restart crowdsec-web-ui
+   ```
+   - Run with the same values as your `.env` (export them first, or
+     paste literals).
+   - **`-f /dev/null` is required.** `cscli machines add` does two
+     things: it registers the machine in the LAPI database (all you
+     want here) **and** can dump the new credentials into
+     `/etc/crowdsec/local_api_credentials.yaml`. That file is
+     bind-mounted (`crowdsec_config/`) and is what the crowdsec
+     container's *own* agent uses to authenticate to its *own* LAPI.
+     Letting `cscli` write it overwrites the container's identity and
+     breaks the engine — persistently, because it's a bind mount.
+     `-f /dev/null` keeps the DB registration and sends the file dump
+     to the void. The web UI never needs that file; it logs in with the
+     `CROWDSEC_USER`/`CROWDSEC_PASSWORD` env vars.
+
+Continue to [Open the UIs](#open-the-uis).
+
+### Path B — migrate an existing install
+
+It's **stock nginx** and a **stock crowdsec** image, so your existing
+Debian-style layout works as-is — you bind your config in and add only
+the small set of integration files.
+
+The `crowdsec_config/` bind mount **replaces** the container's
+`/etc/crowdsec` entirely — the container sees *only* what's in that host
+dir, nothing from the image's defaults. So "what about files that aren't
+in the mount?":
+
+- **Standard files you DON'T ship are auto-created.** On first start the
+  crowdsec image bootstraps anything missing into the bind dir:
+  `config.yaml`, `simulation.yaml`, a default `profiles.yaml`, the
+  `patterns/`, notification *templates*, generated
+  `local_api_credentials.yaml`, and the `COLLECTIONS` from
+  `docker-compose.yml`. They then persist on the host.
+- **Files you DO ship win** — the image only creates a default when the
+  file is *absent*, never overwrites yours (that's why shipping
+  `profiles.yaml` overrides the default).
+- **Your bespoke content is NOT magically migrated** — only what you
+  copy into `crowdsec_config/` exists.
+
+Steps:
+
+1. **Put your nginx tree in `/etc/nginx`.** Drop your existing
+   Debian-style config (`nginx.conf`, `conf.d/`, `sites-available/`,
+   `sites-enabled/`, `snippets/`, `server-conf.d/`, …) into the host
+   `/etc/nginx`. If it's non-empty the container won't touch it — it's
+   used verbatim. You don't need this repo's seed `nginx.conf`.
+2. **Make your `nginx.conf` load the modules.** Ensure it has, at the
+   **main** context, `include /etc/nginx/modules-enabled/*.conf;`
+   (Debian's stock `nginx.conf` already does; nginx.org's does not — add
+   it once) and, inside `http{}`, `include /etc/nginx/conf.d/*.conf;`
+   (standard). Do **not** add your own lua/vts `load_module` lines — the
+   drop-ins handle it. Strip any systemd-isms (`PIDFile=`, etc.) if they
+   leaked in.
+3. **Add the required integration files** listed in
+   [Required for the integration to work](#required-for-the-integration-to-work)
+   — that's the entire integration, no edits to your `nginx.conf` body
+   beyond the two stock `include` lines. Real-IP directives are already
+   in the shipped config (necessary behind Docker's bridge NAT) — leave
+   them alone.
+4. **Update cert paths.** Where you had
+   `ssl_certificate /certs/<domain>/...`, change to
+   `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;` (same for
+   `ssl_certificate_key /etc/ssl/domains/<domain>/privkey.pem;`).
+   Rate-limit / security.txt are optional — see
+   [Optional extras](#optional-extras) if you want them.
+5. **Boot once with the shipped CrowdSec samples** so the image
+   generates a valid baseline (`config.yaml`, credentials, hub) into
+   `crowdsec_config/`:
+   ```bash
+   docker compose up -d
+   ```
+6. **Copy only your *authored* CrowdSec content** from the old box into
+   `crowdsec_config/`: `parsers/s02-enrich/*whitelist*.yaml`, custom
+   `appsec-rules/*.yaml`, a custom `profiles.yaml`, and any custom
+   `scenarios/`/`parsers/` you wrote. (You don't need a custom
+   `appsec-configs/` unless you actually edited one — stock
+   `crowdsecurity/appsec-default` + `target_rules` is enough.)
+   **Do NOT copy:** `config.yaml`, `*_api_credentials.yaml`, `console*`,
+   `hub/`, `data/`, bouncer registrations — these are instance-specific
+   and regenerated for the containerised LAPI. Notification configs
+   (`notifications/*.yaml`) hold tokens — keep them host-only or
+   gitignored, never commit; rotate any token that has been exposed.
+7. **Fix acquisition for the container:** log paths must match the
+   container's mounts, and the AppSec listener must be
+   `listen_addr: 0.0.0.0:7422` with
+   `appsec_config: crowdsecurity/appsec-default` (your baremetal
+   `127.0.0.1:7422` would break — the bouncer reaches it over the
+   compose network).
+8. **Match the API keys** (same as Path A step 1):
+   `crowdsec_bouncer.conf` `API_KEY` = `CROWDSEC_BOUNCER_API_KEY`,
+   `crowdsec_firewall-bouncer.yaml` `api_key` =
+   `CROWDSEC_FW_BOUNCER_API_KEY`, and `nginx-ui/app.ini` `[auth] ApiKey`
+   = `NGINX_UI_API_KEY`.
+9. **Restart, then register the web-UI machine.**
+   ```bash
+   docker compose restart crowdsec
+   docker compose exec crowdsec \
+     cscli machines add "$CROWDSEC_UI_USER" --password "$CROWDSEC_UI_PASSWORD" -f /dev/null
+   docker compose restart crowdsec-web-ui
+   ```
+   `-f /dev/null` is required for the same reason as in
+   [Path A](#path-a--fresh-install) step 4 — it stops `cscli` from
+   clobbering the bind-mounted `local_api_credentials.yaml` the engine
+   authenticates with.
+10. **Verify.**
+    ```bash
+    docker compose exec crowdsec cscli hub list
+    docker compose exec crowdsec cscli metrics
+    docker compose exec crowdsec cscli alerts list
+    docker compose logs crowdsec        # check for parse errors
+    ```
+
+Continue to [Open the UIs](#open-the-uis).
+
+### Open the UIs
+
+- **nginx-ui** — http://localhost (served on port 80 via the proxy itself)
+- **VTS traffic dashboard** — http://localhost:9113/status (the custom
+  HTML dashboard baked into the module)
+- **CrowdSec web UI** — http://localhost:9321
+
+---
+
+## How it works
 
 ### Architecture & maintenance posture
 
@@ -110,19 +322,7 @@ your `/etc/nginx/` only if you want them:
   `/.well-known/security.txt` (edit `www/well-known/security.txt` for
   your contact details), opted in per-server the same way.
 
-### Service monitoring & control
-
-Per nginx-ui's
-[service monitoring and control](https://nginxui.com/guide/config-nginx#service-monitoring-and-control):
-because this is the **stock** nginx the `uozi/nginx-ui` base was built
-for, every code path works with nginx-ui's auto-detected defaults — no
-`app.ini` overrides, no wrapper, no `PIDPath`/`RestartCmd` juggling.
-Status detection (`/var/run/nginx.pid`), `nginx -t`, `nginx -s reload`
-(the Certwarden cert-reload path), and the `start-stop-daemon` restart
-all behave exactly as upstream intends, since `/usr/sbin/nginx` is the
-real binary.
-
-## Stack overview
+### Stack overview
 
 ```
                 Internet
@@ -161,7 +361,7 @@ via the loopback-published `127.0.0.1:8080`.
 
 The CrowdSec web UI authenticates to LAPI with **machine credentials**
 (`CROWDSEC_UI_USER` / `CROWDSEC_UI_PASSWORD`), not a bouncer API key, so
-that machine has to be registered once (see setup step 5).
+that machine has to be registered once (during [Setup](#setup)).
 
 ### Host paths
 
@@ -182,51 +382,17 @@ appsec-config; hub-installed collections also land here at runtime) and
 stays in relative bind-mount dirs next to `docker-compose.yml` — all
 gitignored.
 
-## First-time setup
+### Service monitoring & control
 
-1. **Clone and configure.**
-   ```bash
-   git clone https://github.com/buco7854/custom-docker-images
-   cd custom-docker-images/nginx
-   cp .env.example .env
-   $EDITOR .env                # .env is gitignored — put real secrets here
-   ```
-2. **Create the host dirs.**
-   ```bash
-   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
-   ```
-   Leave `/etc/nginx` **empty** to let the container seed it (default
-   nginx + nginx-ui + CrowdSec + VTS) on first start. Or drop your
-   existing Debian-style tree (`nginx.conf`, `sites-enabled/`, …) into
-   `/etc/nginx` — if it's non-empty the container won't touch it; then
-   add the required integration files into it (see
-   [Required for the integration to work](#required-for-the-integration-to-work)).
-3. **Match the API keys in the bouncer config files.**
-   ```bash
-   $EDITOR crowdsec_bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
-   $EDITOR crowdsec_firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
-   $EDITOR nginx-ui/app.ini                 # [auth] ApiKey = NGINX_UI_API_KEY (after first start)
-   ```
-4. **Bring it up.**
-   ```bash
-   docker compose up -d
-   ```
-   The `BOUNCER_KEY_*` env vars on the CrowdSec service auto-register
-   both bouncer keys on first start.
-5. **Register the web-UI machine account.** The CrowdSec web UI uses
-   machine credentials (not a bouncer key), and the crowdsec image does
-   not auto-register machines:
-   ```bash
-   docker compose exec crowdsec \
-     cscli machines add "$CROWDSEC_UI_USER" --password "$CROWDSEC_UI_PASSWORD"
-   docker compose restart crowdsec-web-ui
-   ```
-   (Run with the same values as your `.env`, or export them first.)
-6. **Open the UIs.**
-   - nginx-ui — http://localhost (served on port 80 via the proxy itself)
-   - VTS traffic dashboard — http://localhost:9113/status (the custom
-     HTML dashboard baked into the module)
-   - CrowdSec web UI — http://localhost:9321
+Per nginx-ui's
+[service monitoring and control](https://nginxui.com/guide/config-nginx#service-monitoring-and-control):
+because this is the **stock** nginx the `uozi/nginx-ui` base was built
+for, every code path works with nginx-ui's auto-detected defaults — no
+`app.ini` overrides, no wrapper, no `PIDPath`/`RestartCmd` juggling.
+Status detection (`/var/run/nginx.pid`), `nginx -t`, `nginx -s reload`
+(the Certwarden cert-reload path), and the `start-stop-daemon` restart
+all behave exactly as upstream intends, since `/usr/sbin/nginx` is the
+real binary.
 
 ## Certwarden integration
 
@@ -278,77 +444,6 @@ Reload after editing any of these:
 ```bash
 docker compose restart crowdsec
 ```
-
-## Migrating an existing CrowdSec install
-
-The `crowdsec_config/` bind mount **replaces** the container's
-`/etc/crowdsec` entirely — the container sees *only* what's in that host
-dir, nothing from the image's defaults. So "what about files that aren't
-in the mount?":
-
-- **Standard files you DON'T ship are auto-created.** On first start the
-  crowdsec image bootstraps anything missing into the bind dir:
-  `config.yaml`, `simulation.yaml`, a default `profiles.yaml`, the
-  `patterns/`, notification *templates*, generated
-  `local_api_credentials.yaml`, and the `COLLECTIONS` from
-  `docker-compose.yml`. They then persist on the host.
-- **Files you DO ship win** — the image only creates a default when the
-  file is *absent*, never overwrites yours (that's why shipping
-  `profiles.yaml` overrides the default).
-- **Your bespoke content is NOT magically migrated** — only what you
-  copy into `crowdsec_config/` exists.
-
-To migrate an existing `/etc/crowdsec` into this stack:
-
-1. **Boot once with the shipped samples** so the image generates a valid
-   baseline (`config.yaml`, credentials, hub) into `crowdsec_config/`.
-2. **Copy only your *authored* content** from the old box:
-   `parsers/s02-enrich/*whitelist*.yaml`, custom `appsec-rules/*.yaml`,
-   a custom `profiles.yaml`, and any custom `scenarios/`/`parsers/` you
-   wrote. (You don't need a custom `appsec-configs/` unless you actually
-   edited one — stock `crowdsecurity/appsec-default` + `target_rules` is
-   enough.)
-3. **Do NOT copy:** `config.yaml`, `*_api_credentials.yaml`, `console*`,
-   `hub/`, `data/`, bouncer registrations — these are instance-specific
-   and regenerated for the containerised LAPI.
-4. **Fix acquisition for the container:** log paths must match the
-   container's mounts, and the AppSec listener must be
-   `listen_addr: 0.0.0.0:7422` with `appsec_config: crowdsecurity/appsec-default`
-   (your baremetal `127.0.0.1:7422` would break — the bouncer reaches it
-   over the compose network).
-5. **Keep secrets out of git.** Notification configs
-   (`notifications/*.yaml`) hold tokens — keep them host-only or
-   gitignored, never commit. Rotate any token that has been exposed.
-6. `docker compose restart crowdsec`, then verify with
-   `docker compose exec crowdsec cscli hub list` and
-   `... cscli metrics` / `cscli alerts list`; check `docker compose logs crowdsec`
-   for parse errors.
-
-## Nginx config migration
-
-It's stock nginx, so your existing Debian layout (`conf.d/`,
-`sites-available/`, `sites-enabled/`, `snippets/`, `server-conf.d/`, …)
-works exactly as it did on bare metal — the image adds nothing of its
-own to those, only the required files below. To migrate:
-
-- **Keep your own `nginx.conf`.** You don't need this repo's seed one.
-  Just ensure it has `include /etc/nginx/modules-enabled/*.conf;` at the
-  **main** context (Debian's stock `nginx.conf` already does) and
-  `include /etc/nginx/conf.d/*.conf;` inside `http{}` (standard).
-- **Add the required files** listed in
-  [Required for the integration to work](#required-for-the-integration-to-work)
-  — that's the entire integration, no edits to your `nginx.conf` body
-  beyond the two stock `include` lines.
-- **Don't add your own lua/vts `load_module`** — the drop-ins handle it.
-- **Strip systemd-isms** if any leaked in (`PIDFile=`, etc.).
-- **Update cert paths.** Where you had `ssl_certificate /certs/<domain>/...`,
-  change to `ssl_certificate /etc/ssl/domains/<domain>/fullchain.pem;`
-  (same for `ssl_certificate_key /etc/ssl/domains/<domain>/privkey.pem;`).
-- **Rate-limit / security.txt** are optional — see
-  [Optional extras](#optional-extras) if you want them.
-
-Real-IP directives are already in `nginx.conf` (necessary because the
-container is behind Docker's bridge NAT) — leave them alone.
 
 ## Maintenance script
 
