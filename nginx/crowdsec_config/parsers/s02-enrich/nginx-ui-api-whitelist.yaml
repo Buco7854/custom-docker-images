@@ -1,0 +1,24 @@
+# Parser whitelist for nginx-ui's own API 403s (sample).
+#
+# This image ships nginx-ui, whose frontend auto-polls /api/* even when
+# logged out -> a burst of 403s that http-probing / generic-bf scenarios
+# would otherwise treat as an attack and ban YOU out of your own panel.
+#
+# Parser-stage (s02-enrich) so it drops the event before any scenario
+# sees it. This is the RIGHT place for log-based false positives (unlike
+# in-band AppSec — see appsec-rules/whitelists.yaml).
+#
+# Narrow it to the nginx-ui vhost by uncommenting the target_fqdn line
+# and setting your real nginx-ui hostname, so a 403 on /api/* for OTHER
+# vhosts is still scored.
+#
+# Reload after editing:  docker compose restart crowdsec
+
+name: my/whitelist-nginx-ui-api-403
+description: "Whitelist nginx-ui frontend 403s on /api/* (false positive when logged out)"
+whitelist:
+  reason: "nginx-ui frontend auto-requests /api/* cause 403s when logged out"
+  expression:
+    - "evt.Meta.http_status == '403'"
+    - "Match('/api/*', evt.Meta.http_path)"
+    # - "evt.Meta.target_fqdn == 'nginx-ui.example.com'"   # set to your nginx-ui vhost

@@ -253,27 +253,76 @@ back read-only at `/etc/ssl/domains`. It then `POST`s
 
 ## CrowdSec whitelists
 
-Whitelists ship version-controlled in `crowdsec_config/`:
+Sample whitelists ship version-controlled in `crowdsec_config/`. They're
+**examples** — edit them for your environment (none contain real IPs).
 
-- **`crowdsec_config/parsers/s02-enrich/whitelists.yaml`** (`my/whitelists`)
-  — runs in the parser stage, so it short-circuits BOTH log-based
-  scenarios AND AppSec events. Use it for trusted IP/CIDR sources.
-  Active automatically (parser whitelists need no wiring).
-- **`crowdsec_config/appsec-rules/whitelists.yaml`** (`my/appsec-whitelists`)
-  — AppSec-specific allowlist rules (e.g. skip the WAF for `/healthz`).
-  **Active**: `crowdsec_config/appsec-configs/appsec-custom.yaml`
-  (`my/appsec-config`) lists `my/appsec-whitelists` in its in-band
-  rules, and `acquis.yaml`'s `appsec_config:` points at it. It mirrors
-  the stock `crowdsecurity/appsec-default` rule set, so the WAF is
-  unchanged apart from your added allowlist rules. Add more `my/...`
-  rules to the file; add their names to `appsec-custom.yaml` if you
-  create separate rule files.
+| File | Stage | What it does |
+|---|---|---|
+| `parsers/s02-enrich/whitelists.yaml` (`my/whitelists`) | parser | Trusted IP/CIDR sources — short-circuits BOTH log scenarios AND AppSec. Active automatically (parser whitelists need no wiring). |
+| `parsers/s02-enrich/nginx-ui-api-whitelist.yaml` | parser | Drops nginx-ui's own `/api/*` 403 bursts (false positive when logged out) before any scenario scores them. |
+| `appsec-rules/whitelists.yaml` (`my/appsec-allow-path`) | AppSec in-band | Exempts a path from **specific** WAF rules via `on_match: allow` + `target_rules:`. Self-attaching — `acquis.yaml` stays on stock `crowdsecurity/appsec-default`, no custom appsec-config. |
 
-Reload after editing either file:
+**Cleanest way to whitelist a path from rules** (your earlier question):
+
+- From **specific** noisy rule(s) → an AppSec rule with `on_match: allow`
+  + `target_rules: [<rule>]` (what `appsec-rules/whitelists.yaml` does).
+  Narrowest blast radius; no appsec-config edit. **Recommended.**
+- From the **entire WAF** for a path → a custom appsec-config with a
+  `pre_eval`/`on_match` hook doing `SetRemediation("allow")` behind a
+  path filter. One place, but disables *all* rules on that path.
+- A **parser** whitelist is the wrong tool for in-band AppSec — it only
+  drops the alert after the request was already 403'd in-band.
+
+Reload after editing any of these:
 
 ```bash
 docker compose restart crowdsec
 ```
+
+## Migrating an existing CrowdSec install
+
+The `crowdsec_config/` bind mount **replaces** the container's
+`/etc/crowdsec` entirely — the container sees *only* what's in that host
+dir, nothing from the image's defaults. So "what about files that aren't
+in the mount?":
+
+- **Standard files you DON'T ship are auto-created.** On first start the
+  crowdsec image bootstraps anything missing into the bind dir:
+  `config.yaml`, `simulation.yaml`, a default `profiles.yaml`, the
+  `patterns/`, notification *templates*, generated
+  `local_api_credentials.yaml`, and the `COLLECTIONS` from
+  `docker-compose.yml`. They then persist on the host.
+- **Files you DO ship win** — the image only creates a default when the
+  file is *absent*, never overwrites yours (that's why shipping
+  `profiles.yaml` overrides the default).
+- **Your bespoke content is NOT magically migrated** — only what you
+  copy into `crowdsec_config/` exists.
+
+To migrate an existing `/etc/crowdsec` into this stack:
+
+1. **Boot once with the shipped samples** so the image generates a valid
+   baseline (`config.yaml`, credentials, hub) into `crowdsec_config/`.
+2. **Copy only your *authored* content** from the old box:
+   `parsers/s02-enrich/*whitelist*.yaml`, custom `appsec-rules/*.yaml`,
+   a custom `profiles.yaml`, and any custom `scenarios/`/`parsers/` you
+   wrote. (You don't need a custom `appsec-configs/` unless you actually
+   edited one — stock `crowdsecurity/appsec-default` + `target_rules` is
+   enough.)
+3. **Do NOT copy:** `config.yaml`, `*_api_credentials.yaml`, `console*`,
+   `hub/`, `data/`, bouncer registrations — these are instance-specific
+   and regenerated for the containerised LAPI.
+4. **Fix acquisition for the container:** log paths must match the
+   container's mounts, and the AppSec listener must be
+   `listen_addr: 0.0.0.0:7422` with `appsec_config: crowdsecurity/appsec-default`
+   (your baremetal `127.0.0.1:7422` would break — the bouncer reaches it
+   over the compose network).
+5. **Keep secrets out of git.** Notification configs
+   (`notifications/*.yaml`) hold tokens — keep them host-only or
+   gitignored, never commit. Rotate any token that has been exposed.
+6. `docker compose restart crowdsec`, then verify with
+   `docker compose exec crowdsec cscli hub list` and
+   `... cscli metrics` / `cscli alerts list`; check `docker compose logs crowdsec`
+   for parse errors.
 
 ## Nginx config migration
 
@@ -357,10 +406,11 @@ nginx/
 ├── crowdsec_bouncer.conf                  # nginx Lua bouncer (mounted into nginx)
 ├── crowdsec_firewall-bouncer.yaml         # firewall bouncer (mounted into firewall-bouncer)
 ├── crowdsec_config/                       # mounted into the crowdsec container (/etc/crowdsec)
-│   ├── acquis.yaml                        # nginx logs + AppSec listener
-│   ├── appsec-configs/appsec-custom.yaml  # my/appsec-config (default rules + my whitelists)
-│   ├── appsec-rules/whitelists.yaml       # my/appsec-whitelists
-│   └── parsers/s02-enrich/whitelists.yaml # my/whitelists
+│   ├── acquis.yaml                        # nginx logs + AppSec listener (stock appsec-default)
+│   ├── profiles.yaml                      # escalating-ban remediation (sample)
+│   ├── appsec-rules/whitelists.yaml       # my/appsec-allow-path (target_rules sample)
+│   ├── parsers/s02-enrich/whitelists.yaml # my/whitelists (IP/CIDR sample)
+│   └── parsers/s02-enrich/nginx-ui-api-whitelist.yaml  # nginx-ui /api/* 403 false-positive
 │                                          # crowdsec_data/ = runtime LAPI state (gitignored)
 ├── www/well-known/security.txt
 └── scripts/{write_cert.sh, maintenance_nginx_ui.sh}

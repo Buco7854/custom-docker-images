@@ -7,14 +7,16 @@ labels:
   type: nginx
 ---
 # AppSec listener — the nginx Lua bouncer forwards requests here for
-# WAF evaluation (see APPSEC_URL in crowdsec_bouncer.conf). The port is
-# exposed only on the proxy_net compose network, never published to the
-# host. `appsec_config` points at our my/appsec-config
-# (appsec-configs/appsec-custom.yaml): the stock crowdsecurity/appsec-
-# default rule set PLUS my/appsec-whitelists, so the allowlist rules in
-# appsec-rules/whitelists.yaml are actually loaded.
+# WAF evaluation (see APPSEC_URL in crowdsec_bouncer.conf). The port
+# binds 0.0.0.0 because the bouncer reaches it over the proxy_net
+# compose network (NOT loopback — 127.0.0.1 here would be a baremetal-
+# ism that breaks in the container); it is never published to the host.
+# Uses the stock crowdsecurity/appsec-default rule set. Per-path / per-
+# rule allowlisting is done with self-attaching rules in
+# appsec-rules/whitelists.yaml (target_rules) — no custom appsec-config
+# needed.
 listen_addr: 0.0.0.0:7422
-appsec_config: my/appsec-config
+appsec_config: crowdsecurity/appsec-default
 name: appsec
 source: appsec
 labels:

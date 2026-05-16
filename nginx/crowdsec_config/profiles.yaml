@@ -1,0 +1,50 @@
+# CrowdSec remediation profiles (sample).
+#
+# If you DON'T ship this file the crowdsec image bootstraps a default
+# one into the bind dir on first start. Shipping it here OVERRIDES that
+# default with an escalating ban: each repeat offence from the same
+# value bans it for progressively longer (4h, 8h, 12h, ...).
+#
+# Notifications are intentionally commented out — wiring ntfy/slack/etc.
+# needs a notifications/<plugin>.yaml that holds a TOKEN. Keep that file
+# out of git (host-only or gitignored) and never commit the token; see
+# the "Migrating an existing CrowdSec install" section in the README.
+#
+# Reload after editing:  docker compose restart crowdsec
+
+# Repeated HTTP DoS / rate-limit offenders — grouped so they share one
+# escalating counter. on_success: continue so the default profile below
+# still applies its remediation too.
+name: http_dos_escalating
+filters:
+  - Alert.Remediation == true &&
+    (Match("crowdsecurity/http-dos*", Alert.Scenario) || Alert.Scenario == "crowdsecurity/nginx-req-limit-exceeded")
+decisions:
+  - type: ban
+    duration: 4h
+duration_expr: Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)
+# notifications:
+#   - ntfy          # requires notifications/ntfy.yaml (token — keep out of git)
+on_success: continue
+---
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
+duration_expr: Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)
+# notifications:
+#   - ntfy
+on_success: break
+---
+name: default_range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 4h
+duration_expr: Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)
+# notifications:
+#   - ntfy
+on_success: break
