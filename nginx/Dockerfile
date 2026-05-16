@@ -224,7 +224,7 @@ RUN set -eux; \
 # /usr/lib/nginx/modules — that's nginx.org's compiled --modules-path on
 # this base, and it's outside /etc/nginx so a host bind mount can't hide
 # them. We assert the detected modules-path matches (fail the build
-# loudly if upstream ever changes it, since the modules-enabled drop-ins
+# loudly if upstream ever changes it, since the modules-available files
 # hardcode this). The LuaJIT runtime .so + jit/ tree go back to the exact
 # /usr/local prefix the module was linked against; ldconfig so the loader
 # resolves libluajit's SONAME. Debian's lua-cjson lands under the
@@ -310,11 +310,25 @@ COPY app.ini /etc/nginx-ui/app.ini
 # seeded — they live in conf/optional/ and are documented as opt-in.
 # (conf.d/crowdsec_nginx.conf was already placed into the template by the
 # bouncer step above, exactly as the .deb does on baremetal.)
-COPY conf/modules-enabled/    /usr/local/etc/nginx/modules-enabled/
+COPY conf/modules-available/  /usr/share/nginx/modules-available/
 COPY conf/conf.d/realip.conf    /usr/local/etc/nginx/conf.d/realip.conf
 COPY conf/conf.d/resolver.conf  /usr/local/etc/nginx/conf.d/resolver.conf
 COPY conf/conf.d/vts.conf       /usr/local/etc/nginx/conf.d/vts.conf
 RUN set -eux; \
+    # Debian convention: the real load_module files are image-owned at
+    # /usr/share/nginx/modules-available (like the .so files at
+    # /usr/lib/nginx/modules — outside /etc/nginx so a bind mount can't
+    # hide them); modules-enabled holds numbered symlinks to them.
+    # Generate the symlinks into the base's seed template — init-config's
+    # `cp -rp` preserves them as symlinks, and the absolute target always
+    # exists in the container even when /etc/nginx is bind-mounted.
+    mkdir -p /usr/local/etc/nginx/modules-enabled; \
+    ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf \
+          /usr/local/etc/nginx/modules-enabled/10-mod-http-ndk.conf; \
+    ln -s /usr/share/nginx/modules-available/mod-http-lua.conf \
+          /usr/local/etc/nginx/modules-enabled/50-mod-http-lua.conf; \
+    ln -s /usr/share/nginx/modules-available/mod-http-vhost-traffic-status.conf \
+          /usr/local/etc/nginx/modules-enabled/70-mod-http-vhost-traffic-status.conf; \
     test -f /usr/local/etc/nginx/nginx.conf; \
     if ! grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf; then \
         sed -i '1i include /etc/nginx/modules-enabled/*.conf;' \

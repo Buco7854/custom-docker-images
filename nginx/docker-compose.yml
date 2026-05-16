@@ -16,9 +16,10 @@
 #   /etc/nginx           nginx config (bind-mounted into the nginx container)
 #   /var/log/nginx       access/error logs (RW for nginx, RO for crowdsec)
 #   /etc/ssl/domains     SSL certs (certwarden writes via /certs, nginx reads)
+#   /var/www             static web root (security.txt etc.)
 #
 # First run:
-#   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
+#   sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains /var/www
 #   cp .env.example .env  &&  $EDITOR .env
 # Leave /etc/nginx EMPTY and the container seeds it (default nginx +
 # nginx-ui + CrowdSec + VTS) on first start. If /etc/nginx already has a
@@ -40,7 +41,7 @@ services:
       - /etc/ssl/domains:/etc/ssl/domains:ro
       - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
       - ./crowdsec_bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
-      - ./www:/var/www                                            # static files (security.txt etc.)
+      - /var/www:/var/www                                         # static files (security.txt etc.)
     environment:
       - TZ=${TZ}
     networks:

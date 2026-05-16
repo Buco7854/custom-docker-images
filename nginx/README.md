@@ -64,7 +64,7 @@ Both finish at [Open the UIs](#open-the-uis). Do the
 - Create the host dirs (the nginx container uses absolute Debian-style
   paths — see [Host paths](#host-paths)):
   ```bash
-  sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains
+  sudo mkdir -p /etc/nginx /var/log/nginx /etc/ssl/domains /var/www
   ```
 - Clone the repo and fill in a `.env`:
   ```bash
@@ -245,8 +245,8 @@ commands all just work — there is nothing to override in `app.ini`.
 
 Two modules are added as `.so` files baked at `/usr/lib/nginx/modules`
 (outside `/etc/nginx`, so a host bind mount can't hide them; the
-`load_module` lines live in the `modules-enabled/` drop-in — see
-config layout below):
+`load_module` lines live in the image-owned `modules-available/` files,
+symlinked from `modules-enabled/` — see config layout below):
 
 | Module | Where it comes from | Update story |
 |---|---|---|
@@ -298,7 +298,7 @@ to function. Names match a normal Debian baremetal install — nothing
 
 | File | Why it's required |
 |---|---|
-| `modules-enabled/10-mod-http-ndk.conf`, `50-mod-http-lua.conf`, `70-mod-http-vhost-traffic-status.conf` | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). One line each, Debian's `NN-mod-http-<name>.conf` convention. The `.so` files live in the image at `/usr/lib/nginx/modules` (outside `/etc/nginx`). |
+| `modules-enabled/{10-mod-http-ndk,50-mod-http-lua,70-mod-http-vhost-traffic-status}.conf` — **symlinks** | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). Debian convention: the real one-line files are image-owned at `/usr/share/nginx/modules-available/mod-http-{ndk,lua,vhost-traffic-status}.conf` (like the `.so` files at `/usr/lib/nginx/modules`, outside `/etc/nginx`); `modules-enabled/` holds the numbered symlinks. A seeded `/etc/nginx` gets them automatically. Bring-your-own: create the symlinks yourself — `ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf modules-enabled/10-mod-http-ndk.conf` (likewise `50-…-lua`, `70-…-vhost-traffic-status`). |
 | `include /etc/nginx/modules-enabled/*.conf;` at the **main** context of your `nginx.conf` | `load_module` is only valid in the main context, never `http{}`. Debian's stock `nginx.conf` already has this line; nginx.org's does not — add it once. |
 | `include /etc/nginx/conf.d/*.conf;` inside `http{}` | Standard; pulls in everything below. |
 | `conf.d/crowdsec_nginx.conf` | The CrowdSec bouncer itself. Ships in the bouncer package, **not this repo** — grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .` (it's byte-for-byte the file `apt install crowdsec-nginx-bouncer` installs). |
@@ -319,8 +319,9 @@ your `/etc/nginx/` only if you want them:
   — connection/request rate-limit zones, opted into per-server with
   `include snippets/ratelimit.conf;` inside a `server {}` block.
 - `optional/snippets/security-txt.conf` — serves
-  `/.well-known/security.txt` (edit `www/well-known/security.txt` for
-  your contact details), opted in per-server the same way.
+  `/.well-known/security.txt` (copy the repo's `www/` sample to the host
+  `/var/www`, then edit `/var/www/well-known/security.txt` for your
+  contact details), opted in per-server the same way.
 
 ### Stack overview
 
@@ -373,12 +374,15 @@ from the host:
 | `/etc/nginx`       | `/etc/nginx`        | you — drop your config here        |
 | `/var/log/nginx`   | `/var/log/nginx`    | nginx writes, crowdsec reads (RO)  |
 | `/etc/ssl/domains` | `/etc/ssl/domains`  | certwarden writes (via its `/certs` mount), nginx reads (RO)|
+| `/var/www`         | `/var/www`          | you — static web root (`security.txt`, etc.) |
 
 CrowdSec uses two flat bind dirs next to `docker-compose.yml`:
 `crowdsec_config/` (version-controlled — acquis, whitelists,
 appsec-config; hub-installed collections also land here at runtime) and
-`crowdsec_data/` (runtime LAPI state DB — gitignored). Everything else
-(nginx-ui state, www files, web-ui data, certwarden data) likewise
+`crowdsec_data/` (runtime LAPI state DB — gitignored). The static web
+root is the absolute host path `/var/www` (same Debian-style convention
+as `/etc/nginx` — the repo's `www/` is just a sample to copy there).
+Everything else (nginx-ui state, web-ui data, certwarden data) likewise
 stays in relative bind-mount dirs next to `docker-compose.yml` — all
 gitignored.
 
@@ -491,8 +495,9 @@ nginx/
 ├── conf/                     # REQUIRED bits — seeded into /etc/nginx if empty
 │   ├── nginx.conf            # plain skeleton (only for a from-scratch user)
 │   ├── mime.types
-│   ├── modules-enabled/{10-mod-http-ndk, 50-mod-http-lua,
-│   │                    70-mod-http-vhost-traffic-status}.conf
+│   ├── modules-available/{mod-http-ndk, mod-http-lua,
+│   │                      mod-http-vhost-traffic-status}.conf
+│   │                          # image symlinks these into modules-enabled/
 │   ├── conf.d/{realip, resolver, vts}.conf
 │   │                          # crowdsec_nginx.conf comes from the .deb
 │   └── optional/             # NOT seeded — opt-in examples (see README)
@@ -507,6 +512,6 @@ nginx/
 │   ├── parsers/s02-enrich/whitelists.yaml # my/whitelists (IP/CIDR sample)
 │   └── parsers/s02-enrich/nginx-ui-api-whitelist.yaml  # nginx-ui /api/* 403 false-positive
 │                                          # crowdsec_data/ = runtime LAPI state (gitignored)
-├── www/well-known/security.txt
+├── www/well-known/security.txt          # sample — copy to host /var/www/
 └── scripts/{write_cert.sh, maintenance_nginx_ui.sh}
 ```
