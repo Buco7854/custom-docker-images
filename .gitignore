@@ -8,7 +8,7 @@
 nginx/nginx-ui/
 nginx/crowdsec_data/
 nginx/crowdsec-web-ui/
-nginx/certwarden/data/
+nginx/certwarden_data/
 nginx/prometheus/data/
 nginx/grafana/data/
 nginx/data/

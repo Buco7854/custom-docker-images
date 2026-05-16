@@ -138,7 +138,7 @@ services:
       - "127.0.0.1:4065:4065"   # pprof debug server (http)
       - "127.0.0.1:4070:4070"   # pprof debug server (https)
     volumes:
-      - ./certwarden/data:/app/data
+      - ./certwarden_data:/app/data
       - ./scripts:/scripts:ro                # post-issuance hook lives here
       - /etc/ssl/domains:/certs              # writes /certs/<name>/{fullchain,privkey}.pem
     networks:
