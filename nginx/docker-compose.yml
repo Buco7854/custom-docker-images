@@ -56,7 +56,7 @@ services:
       - /var/log/nginx:/var/log/nginx:ro
     environment:
       - TZ=${TZ}
-      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/linux crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
       - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
       - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
     ports:
