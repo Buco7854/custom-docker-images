@@ -1,0 +1,41 @@
+# AppSec allowlist — exempt a path from SPECIFIC WAF rules.
+#
+# This is the cleanest way to silence a known false positive from one
+# (or a few) named rules without weakening the rest of the WAF:
+#
+#   * `on_match: allow`        -> matched requests are allowed
+#   * `target_rules: [...]`    -> this rule auto-attaches ONLY alongside
+#                                 the listed rule(s); no appsec-config
+#                                 edit, no inband_rules wiring needed.
+#                                 acquis.yaml stays on stock
+#                                 crowdsecurity/appsec-default.
+#
+# Scope choices (pick the narrowest that fixes your false positive):
+#   * from specific rules  -> this file (target_rules). RECOMMENDED.
+#   * from the WHOLE WAF for a path -> a custom appsec-config with a
+#       `pre_eval`/`on_match` hook doing SetRemediation("allow") behind
+#       a path filter (one place, but disables ALL rules for that path).
+#   * NOT the parser whitelist (parsers/s02-enrich/) — that only drops
+#       the alert AFTER the in-band block already happened, so the
+#       request is still 403'd. Wrong tool for in-band AppSec.
+#
+# Docs: https://docs.crowdsec.net/docs/appsec/create_rules/
+# Reload after editing:  docker compose restart crowdsec
+
+name: my/appsec-allow-path
+description: "Allow a known-safe path past a noisy rule (sample)"
+on_match: allow
+rules:
+  - zones:
+      - URI
+    transform:
+      - lowercase
+    match:
+      type: startsWith
+      value: "/.well-known/"
+# Only attach to the rule(s) that false-positive on this path. Replace
+# with the rule name(s) you actually see in `cscli appsec-rules list`
+# / your AppSec alerts (e.g. crowdsecurity/experimental-no-user-agent
+# fires on legit user-agent-less clients like feed/OPDS readers).
+target_rules:
+  - crowdsecurity/experimental-no-user-agent

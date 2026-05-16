@@ -39,7 +39,7 @@ services:
       - /var/log/nginx:/var/log/nginx
       - /etc/ssl/domains:/etc/ssl/domains:ro
       - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
-      - ./crowdsec/bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+      - ./crowdsec_bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
       - ./www:/var/www                                            # static files (security.txt etc.)
     environment:
       - TZ=${TZ}
@@ -51,12 +51,22 @@ services:
     container_name: crowdsec
     restart: unless-stopped
     volumes:
-      - ./crowdsec/config:/etc/crowdsec
-      - ./crowdsec/data:/var/lib/crowdsec/data
+      - ./crowdsec_config:/etc/crowdsec              # config: authored files + hub installs (bind)
+      - ./crowdsec_data:/var/lib/crowdsec/data       # runtime state DB: LAPI decisions/alerts (bind)
       - /var/log/nginx:/var/log/nginx:ro
     environment:
       - TZ=${TZ}
-      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+      # Each collection pulls its own parsers/scenarios/appsec-rules/
+      # contexts/postoverflows, so listing collections is enough — no
+      # need to enumerate sub-items. nginx/http*/wordpress/appsec* are
+      # driven by THIS stack's acquis (nginx logs + the AppSec listener).
+      # linux/sshd/synology-dsm are kept to mirror the reference box but
+      # stay INERT here until you add their log sources to
+      # crowdsec_config/acquis.yaml. appsec-crs/-wordpress rules install
+      # but only the appsec-default inband set (base-config + vpatch-* +
+      # generic-*) is active, since acquis.yaml keeps the stock
+      # crowdsecurity/appsec-default config.
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/http-dos crowdsecurity/wordpress crowdsecurity/whitelist-good-actors crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/appsec-wordpress crowdsecurity/appsec-crs crowdsecurity/linux crowdsecurity/sshd crowdsecurity/synology-dsm
       - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
       - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
     ports:
@@ -78,7 +88,7 @@ services:
       - NET_ADMIN
       - NET_RAW
     volumes:
-      - ./crowdsec/firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+      - ./crowdsec_firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
     depends_on:
       - crowdsec
 
