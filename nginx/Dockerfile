@@ -1,42 +1,52 @@
 # syntax=docker/dockerfile:1.7
 #
-# buco7854/nginx — uozi/nginx-ui + CrowdSec Lua bouncer + nginx-module-vts,
-# the Debian-native way. NO OpenResty (its apt repo lags Debian releases
-# by many months — unworkable).
+# buco7854/nginx — uozi/nginx-ui + CrowdSec Lua bouncer + nginx-module-vts.
 #
-# Two things get added to the stock nginx that uozi/nginx-ui ships:
+# NO OpenResty (its apt repo lags Debian releases by many months) and NO
+# Debian libnginx-mod-* either. uozi/nginx-ui ships nginx.org MAINLINE
+# (e.g. 1.29.x), while Debian's lua/ndk modules are built for Debian's
+# much older nginx (e.g. 1.26.x). nginx's dynamic-module version check is
+# EXACT and is NOT relaxed by --with-compat (that only standardises the
+# configure-option signature, never the version), so a Debian module can
+# never load here — it fails with "version 1026003 instead of 1029008".
 #
-#   1. lua  — Debian's libnginx-mod-http-lua + libnginx-mod-http-ndk.
-#             Debian builds them --with-compat, exactly the ABI contract
-#             that lets a dynamic module load into nginx.org's nginx.
-#             Fetched from the SAME base image, so the module always
-#             matches the running nginx's Debian release. Auto-patched by
-#             Debian on every weekly rebuild. Used ONLY by the CrowdSec
-#             bouncer.
+# So everything that isn't pure config is compiled from source against
+# the EXACT nginx version uozi ships (detected from `nginx -v`),
+# --with-compat, in a builder stage on the SAME base (identical
+# pcre2/openssl/zlib as runtime):
 #
-#   2. vts  — nginx-module-vts has no Debian package, so it's compiled as
-#             a dynamic module against the EXACT nginx version uozi ships
-#             (detected from `nginx -v`), --with-compat, in a builder
-#             stage on the SAME base (identical pcre2/openssl/zlib as
-#             runtime). Serves the custom HTML dashboard baked in via
-#             VTS's tplToDefine.sh — no lua, no Prometheus.
+#   1. lua  — LuaJIT (openresty/luajit2) + ngx_devel_kit (NDK) +
+#             lua-nginx-module, built against the exact nginx. The
+#             lua-resty-core / lua-resty-lrucache pair (MANDATORY for
+#             modern lua-nginx-module — init_by_lua loads resty.core or
+#             aborts) is vendored onto the lua path from the same upstream
+#             default branch so it always matches the module. Used ONLY by
+#             the CrowdSec bouncer.
 #
-# A build-time `nginx -t` that loads all three modules and requires the
+#   2. vts  — nginx-module-vts, same exact-nginx compile. Serves the
+#             custom HTML dashboard baked in via VTS's tplToDefine.sh —
+#             no lua, no Prometheus.
+#
+# A build-time `nginx -t` that loads all three modules and, inside
+# init_by_lua (which forces resty.core to load), requires the bouncer's
 # lua deps is the guard: any upstream break fails the BUILD loudly, it
 # never silently ships a broken image.
 #
 # Maintenance posture:
-#   * nginx + lua module: auto-patched by Debian each weekly rebuild.
-#   * VTS: recompiled against whatever nginx version uozi ships, every
-#     rebuild — tracks nginx automatically. Bump VTS_VERSION only if a
-#     future nginx breaks the pinned VTS (the build will tell you).
-#   * CrowdSec bouncer + lua-resty-*: PINNED for reproducibility.
+#   * lua stack + VTS: recompiled against whatever nginx version uozi
+#     ships, every weekly rebuild — tracks nginx automatically. The lua
+#     module set (LuaJIT + NDK + lua-nginx-module + lua-resty-core/
+#     -lrucache) moves together on upstream's default branches; pin a
+#     one-off reproducible build with the *_REF build-args. The build
+#     fails red if a future nginx ever breaks a tracked/pinned component.
+#   * CrowdSec bouncer + lua-resty-http/-string: PINNED / luarocks-latest
+#     exactly as before, guarded by the same build-time `nginx -t`.
 #   * No OpenResty, no nginx wrapper. Stock nginx => nginx-ui just works.
 
 ARG NGINX_UI_TAG=latest
 
 ############################################################
-# Stage 1: collect .deb + lua assets from the SAME base
+# Stage 1: collect the CrowdSec bouncer .deb + pure-lua libs
 ############################################################
 FROM uozi/nginx-ui:${NGINX_UI_TAG} AS assets
 
@@ -51,9 +61,6 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates gnupg luarocks; \
     \
-    mkdir -p /assets/deb; cd /assets/deb; \
-    apt-get download libnginx-mod-http-lua libnginx-mod-http-ndk; \
-    \
     curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey -o /tmp/cs.key; \
     fpr="$(gpg --show-keys --with-fingerprint --with-colons /tmp/cs.key \
             | awk -F: '/^fpr/ {print $10; exit}')"; \
@@ -64,15 +71,15 @@ RUN set -eux; \
     echo "deb [signed-by=/usr/share/keyrings/crowdsec.gpg] https://packagecloud.io/crowdsec/crowdsec/debian/ ${CROWDSEC_DEBIAN_RELEASE} main" \
         > /etc/apt/sources.list.d/crowdsec.list; \
     apt-get update; \
+    \
+    mkdir -p /assets/deb; cd /assets/deb; \
     if [ -n "${CS_NGINX_BOUNCER_VERSION}" ]; then \
         apt-get download "crowdsec-nginx-bouncer=${CS_NGINX_BOUNCER_VERSION}*"; \
     else \
         apt-get download crowdsec-nginx-bouncer; \
     fi; \
     \
-    mkdir -p /assets/lua /assets/bouncer; \
-    dpkg-deb -x "$(ls libnginx-mod-http-lua_*.deb)" /assets/lua; \
-    dpkg-deb -x "$(ls libnginx-mod-http-ndk_*.deb)" /assets/lua; \
+    mkdir -p /assets/bouncer; \
     dpkg-deb -x "$(ls crowdsec-nginx-bouncer_*.deb)" /assets/bouncer; \
     \
     # lua-resty-http (HTTP client the bouncer uses to reach LAPI) and
@@ -95,22 +102,29 @@ RUN set -eux; \
     for f in crowdsec.lua ban.html captcha.html crowdsec_nginx.conf crowdsec-nginx-bouncer.conf; do \
         find /assets/bouncer -name "$f" -print -quit | grep -q . \
             || { echo "FATAL: $f missing from CrowdSec bouncer .deb" >&2; exit 1; }; \
-    done; \
-    find /assets/lua -name 'ngx_http_lua_module.so' -print -quit | grep -q . \
-        || { echo "FATAL: ngx_http_lua_module.so missing" >&2; exit 1; }
+    done
 
 ############################################################
-# Stage 2: compile nginx-module-vts against the exact nginx
+# Stage 2: compile LuaJIT + NDK + lua-nginx-module + VTS
+#          against the EXACT nginx uozi ships
 ############################################################
 FROM uozi/nginx-ui:${NGINX_UI_TAG} AS builder
 
-# VTS is intentionally NOT pinned — we track its default branch so it
-# stays compatible with whatever nginx version uozi ships (VTS upstream
-# fixes nginx-compat there first). The final-stage `nginx -t` guard
-# fails the build loudly if a given VTS/nginx pair is ever incompatible,
-# so "latest" never silently ships broken. Override with --build-arg
-# VTS_REF=<tag> for a one-off reproducible build.
+# Everything here is intentionally NOT pinned by default — we track each
+# project's default branch so the set stays compatible with whatever
+# nginx version uozi ships (upstream fixes nginx-compat there first). The
+# lua module set (NDK + lua-nginx-module + lua-resty-core/-lrucache) is
+# developed in lockstep on those branches, so tracking them together
+# keeps them mutually compatible. The final-stage `nginx -t` guard fails
+# the build loudly if a given combination is ever incompatible, so the
+# default never silently ships broken. Override any one with its
+# --build-arg <NAME>_REF=<tag> for a one-off reproducible build.
 ARG VTS_REF=
+ARG NDK_REF=
+ARG LUA_NGINX_MODULE_REF=
+ARG LUA_RESTY_CORE_REF=
+ARG LUA_RESTY_LRUCACHE_REF=
+ARG LUAJIT2_REF=
 
 # Custom VTS dashboard, baked into the module at compile time via VTS's
 # own tplToDefine.sh. This is the ONLY status output — no Prometheus
@@ -122,33 +136,70 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential perl libpcre2-dev libssl-dev zlib1g-dev; \
     NGX_VER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
+    clone() { \
+        if [ -n "$3" ]; then git clone --depth 1 --branch "$3" "$2" "$1"; \
+        else git clone --depth 1 "$2" "$1"; fi; \
+    }; \
     cd /tmp; \
     curl -fsSL "https://nginx.org/download/nginx-${NGX_VER}.tar.gz" | tar xz; \
-    if [ -n "${VTS_REF}" ]; then \
-        git clone --depth 1 --branch "${VTS_REF}" \
-            https://github.com/vozlt/nginx-module-vts.git /tmp/vts; \
-    else \
-        git clone --depth 1 \
-            https://github.com/vozlt/nginx-module-vts.git /tmp/vts; \
-    fi; \
-    echo "compiling VTS ($(git -C /tmp/vts rev-parse --short HEAD)) against nginx ${NGX_VER}"; \
-    # Bake the custom HTML dashboard into the module. tplToDefine.sh invokes
-    # `perl fileToHex.pl` by a BARE relative name, so it only works when run
-    # from util/ — run it there in a subshell (our cwd stays /tmp) writing to
-    # an absolute path. The script has no `set -e` and exits 0 even when
-    # fileToHex.pl can't be found, silently emitting an empty #define that
-    # only explodes later at `make`; assert the macro got a real body so any
-    # such breakage fails the BUILD loudly right here.
+    \
+    # LuaJIT (OpenResty's fork) — lua-nginx-module's runtime. Build +
+    # install to /usr/local; the runtime .so + jit/ lua tree are staged
+    # for the final image (the module records libluajit's SONAME and the
+    # default lua path points at this exact prefix).
+    clone /tmp/luajit2 https://github.com/openresty/luajit2.git "${LUAJIT2_REF}"; \
+    make -C /tmp/luajit2 -j"$(nproc)"; \
+    make -C /tmp/luajit2 install PREFIX=/usr/local; \
+    ldconfig; \
+    export LUAJIT_LIB=/usr/local/lib; \
+    export LUAJIT_INC=/usr/local/include/luajit-2.1; \
+    \
+    clone /tmp/ndk              https://github.com/vision5/ngx_devel_kit.git      "${NDK_REF}"; \
+    clone /tmp/lua-nginx-module https://github.com/openresty/lua-nginx-module.git "${LUA_NGINX_MODULE_REF}"; \
+    clone /tmp/vts              https://github.com/vozlt/nginx-module-vts.git     "${VTS_REF}"; \
+    echo "compiling against nginx ${NGX_VER}:" \
+         "luajit2($(git -C /tmp/luajit2 rev-parse --short HEAD))" \
+         "ndk($(git -C /tmp/ndk rev-parse --short HEAD))" \
+         "lua-nginx-module($(git -C /tmp/lua-nginx-module rev-parse --short HEAD))" \
+         "vts($(git -C /tmp/vts rev-parse --short HEAD))"; \
+    \
+    # Bake the custom HTML dashboard into the VTS module. tplToDefine.sh
+    # invokes `perl fileToHex.pl` by a BARE relative name, so it only
+    # works when run from util/ — run it there in a subshell (our cwd
+    # stays /tmp) writing to an absolute path. The script has no `set -e`
+    # and exits 0 even when fileToHex.pl can't be found, silently emitting
+    # an empty #define that only explodes later at `make`; assert the
+    # macro got a real body so any such breakage fails the BUILD loudly
+    # right here.
     chmod +x /tmp/vts/util/tplToDefine.sh; \
     ( cd /tmp/vts/util && ./tplToDefine.sh /tmp/status.html ) \
         > /tmp/vts/src/ngx_http_vhost_traffic_status_module_html.h; \
     grep -qF '\x' /tmp/vts/src/ngx_http_vhost_traffic_status_module_html.h \
         || { echo "FATAL: VTS HTML dashboard header is empty (tplToDefine.sh failed)" >&2; exit 1; }; \
+    \
+    # NDK must precede lua-nginx-module in the configure order.
     cd "nginx-${NGX_VER}"; \
-    ./configure --with-compat --add-dynamic-module=/tmp/vts; \
+    ./configure --with-compat \
+        --add-dynamic-module=/tmp/ndk \
+        --add-dynamic-module=/tmp/lua-nginx-module \
+        --add-dynamic-module=/tmp/vts; \
     make -j"$(nproc)" modules; \
-    mkdir -p /assets; \
-    cp objs/ngx_http_vhost_traffic_status_module.so /assets/
+    \
+    mkdir -p /assets/modules /assets/luajit /assets/luaresty; \
+    cp objs/ndk_http_module.so \
+       objs/ngx_http_lua_module.so \
+       objs/ngx_http_vhost_traffic_status_module.so /assets/modules/; \
+    cp -a /usr/local/lib/libluajit-5.1.so* /assets/luajit/; \
+    mkdir -p /assets/luajit/share; \
+    cp -a /usr/local/share/luajit-2.1/.    /assets/luajit/share/; \
+    \
+    # lua-resty-core / -lrucache are MANDATORY for modern lua-nginx-module
+    # (init_by_lua loads resty.core or aborts). Same upstream default
+    # branch as the module above => guaranteed-compatible pair.
+    clone /tmp/lua-resty-core     https://github.com/openresty/lua-resty-core.git     "${LUA_RESTY_CORE_REF}"; \
+    clone /tmp/lua-resty-lrucache https://github.com/openresty/lua-resty-lrucache.git "${LUA_RESTY_LRUCACHE_REF}"; \
+    cp -a /tmp/lua-resty-core/lib/.     /assets/luaresty/; \
+    cp -a /tmp/lua-resty-lrucache/lib/. /assets/luaresty/
 
 ############################################################
 # Stage 3: final image
@@ -168,25 +219,44 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends lua-cjson sqlite3 ca-certificates; \
     rm -rf /var/lib/apt/lists/*
 
-# Install lua + ndk (Debian) and vts (compiled) into /usr/lib/nginx/
-# modules — that's nginx.org's compiled --modules-path on this base, and
-# it's outside /etc/nginx so a host bind mount can't hide them. We assert
-# the detected modules-path matches (fail the build loudly if upstream
-# ever changes it, since the modules-enabled drop-ins hardcode this).
-COPY --from=assets  /assets/lua /tmp/lua
-COPY --from=builder /assets/ngx_http_vhost_traffic_status_module.so /tmp/vts.so
+# All three modules are compiled (builder stage) against the EXACT nginx
+# uozi ships, alongside the LuaJIT runtime. Install the .so into
+# /usr/lib/nginx/modules — that's nginx.org's compiled --modules-path on
+# this base, and it's outside /etc/nginx so a host bind mount can't hide
+# them. We assert the detected modules-path matches (fail the build
+# loudly if upstream ever changes it, since the modules-enabled drop-ins
+# hardcode this). The LuaJIT runtime .so + jit/ tree go back to the exact
+# /usr/local prefix the module was linked against; ldconfig so the loader
+# resolves libluajit's SONAME. Debian's lua-cjson lands under the
+# multiarch dir, which is NOT on our nginx.org-prefixed module's default
+# lua_package_cpath (Debian's own module had it) — symlink it onto a
+# default cpath entry so the bouncer's `require "cjson"` resolves with no
+# extra config, exactly as it did with the Debian module.
+COPY --from=builder /assets/modules /tmp/mods
+COPY --from=builder /assets/luajit  /tmp/luajit
 RUN set -eux; \
     MODPATH=/usr/lib/nginx/modules; \
     DETECTED="$(nginx -V 2>&1 | grep -oE -- '--modules-path=[^ ]+' | sed 's/.*=//')"; \
     [ "${DETECTED:-$MODPATH}" = "$MODPATH" ] \
         || { echo "FATAL: nginx modules-path is $DETECTED, expected $MODPATH" >&2; exit 1; }; \
     mkdir -p "$MODPATH"; \
-    install -m644 "$(find /tmp/lua -name ndk_http_module.so -print -quit)" \
+    install -m644 /tmp/mods/ndk_http_module.so \
         "$MODPATH/ndk_http_module.so"; \
-    install -m644 "$(find /tmp/lua -name ngx_http_lua_module.so -print -quit)" \
+    install -m644 /tmp/mods/ngx_http_lua_module.so \
         "$MODPATH/ngx_http_lua_module.so"; \
-    install -m644 /tmp/vts.so "$MODPATH/ngx_http_vhost_traffic_status_module.so"; \
-    rm -rf /tmp/lua /tmp/vts.so
+    install -m644 /tmp/mods/ngx_http_vhost_traffic_status_module.so \
+        "$MODPATH/ngx_http_vhost_traffic_status_module.so"; \
+    install -d /usr/local/lib; \
+    cp -a /tmp/luajit/libluajit-5.1.so* /usr/local/lib/; \
+    mkdir -p /usr/local/share/luajit-2.1; \
+    cp -a /tmp/luajit/share/. /usr/local/share/luajit-2.1/; \
+    ldconfig; \
+    CJSON="$(find /usr/lib /usr/local/lib -name cjson.so -path '*lua/5.1/*' -print -quit)"; \
+    [ -n "$CJSON" ] \
+        || { echo "FATAL: lua-cjson cjson.so not found" >&2; exit 1; }; \
+    install -d /usr/local/lib/lua/5.1; \
+    ln -sf "$CJSON" /usr/local/lib/lua/5.1/cjson.so; \
+    rm -rf /tmp/mods /tmp/luajit
 
 # CrowdSec bouncer assets at the EXACT paths `apt install
 # crowdsec-nginx-bouncer` uses on baremetal: lua at /usr/lib/crowdsec/
@@ -209,10 +279,15 @@ RUN set -eux; \
        /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf; \
     rm -rf /tmp/bouncer
 
-# Vendored pure-lua bouncer deps onto LuaJIT's default search path (the
-# CrowdSec snippet's lua_package_path ends with `;;`, which appends this).
-COPY --from=assets /assets/luatree/share/lua/5.1/ /usr/local/share/lua/5.1/
-COPY --from=assets /assets/luatree/lib/lua/5.1/   /usr/local/lib/lua/5.1/
+# Vendored pure-lua deps onto LuaJIT's default search path (the CrowdSec
+# snippet's lua_package_path ends with `;;`, which appends this):
+#   * lua-resty-core / -lrucache — MANDATORY for modern lua-nginx-module
+#     (init_by_lua loads resty.core or aborts). Built from the same
+#     upstream default branch as lua-nginx-module so they always match.
+#   * lua-resty-http / -string   — the CrowdSec bouncer's own deps.
+COPY --from=builder /assets/luaresty/              /usr/local/share/lua/5.1/
+COPY --from=assets  /assets/luatree/share/lua/5.1/ /usr/local/share/lua/5.1/
+COPY --from=assets  /assets/luatree/lib/lua/5.1/   /usr/local/lib/lua/5.1/
 
 COPY app.ini /etc/nginx-ui/app.ini
 
@@ -247,8 +322,12 @@ RUN set -eux; \
     fi; \
     grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf
 
-# Build-time guard: load all three modules + require the lua deps + open
-# a VTS zone. Any --with-compat / lua-path / VTS breakage fails HERE.
+# Build-time guard: load all three modules + open a VTS zone + run an
+# init_by_lua that requires the bouncer's lua deps. init_by_lua forces
+# lua-nginx-module to load resty.core (mandatory; aborts if missing), so
+# this single `nginx -t` validates the whole compiled stack: the exact
+# nginx<->module version match, --with-compat, LuaJIT, the lua path, and
+# resty.core/http/string/cjson all resolving. Any breakage fails HERE.
 RUN set -eux; \
     MODPATH=/usr/lib/nginx/modules; \
     { \
@@ -257,7 +336,7 @@ RUN set -eux; \
       echo "load_module $MODPATH/ngx_http_vhost_traffic_status_module.so;"; \
       echo "events{}"; \
       echo "http{ vhost_traffic_status_zone; lua_shared_dict d 1m;"; \
-      echo "      init_by_lua_block { require 'resty.http'; require 'resty.string' } }"; \
+      echo "      init_by_lua_block { require 'resty.http'; require 'resty.string'; require 'cjson' } }"; \
     } > /tmp/probe.conf; \
     nginx -t -c /tmp/probe.conf; \
     rm /tmp/probe.conf; \
