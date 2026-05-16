@@ -74,7 +74,9 @@ Both finish at [Open the UIs](#open-the-uis). Do the
   $EDITOR .env                # .env is gitignored — put real secrets here
   ```
   Pick long random strings for the two bouncer keys
-  (`openssl rand -hex 32`) and a long `CROWDSEC_UI_PASSWORD`.
+  (`openssl rand -hex 32`) and a long `CROWDSEC_UI_PASSWORD`. These are
+  **fresh secrets even if you're migrating** — the old LAPI / bouncer
+  registrations are not reused (see Path B step 8).
 
 ### Path A — fresh install
 
@@ -197,11 +199,33 @@ Steps:
    `appsec_config: crowdsecurity/appsec-default` (your baremetal
    `127.0.0.1:7422` would break — the bouncer reaches it over the
    compose network).
-8. **Match the API keys** (same as Path A step 1):
-   `crowdsec_bouncer.conf` `API_KEY` = `CROWDSEC_BOUNCER_API_KEY`,
-   `crowdsec_firewall-bouncer.yaml` `api_key` =
-   `CROWDSEC_FW_BOUNCER_API_KEY`, and `nginx-ui/app.ini` `[auth] ApiKey`
-   = `NGINX_UI_API_KEY`.
+8. **Set the bouncer API keys — fresh secrets, *not* migrated.** Your
+   old box's LAPI database and bouncer registrations are **not** carried
+   over (step 6): the containerised LAPI starts with an empty DB, and on
+   first start the `BOUNCER_KEY_nginx` / `BOUNCER_KEY_firewall` env vars
+   (fed from `.env`) **auto-register** a bouncer for whatever key string
+   you set. So just generate two new random keys
+   (`openssl rand -hex 32`) in `.env`, exactly as for a fresh install —
+   nothing is checked against the old install.
+
+   The two bouncer config files themselves **ship in the repo**
+   (`crowdsec_bouncer.conf`, `crowdsec_firewall-bouncer.yaml`) — `git
+   clone` already gave you them, bind-mounted into the containers and
+   pre-wired for this stack's network with `REPLACE_WITH_…` placeholder
+   keys. You do **not** create or generate them, and you should **not**
+   copy your old baremetal ones: the repo files already point the nginx
+   bouncer at `http://crowdsec:8080` (the compose service name) and the
+   firewall bouncer at `http://127.0.0.1:8080/` (it's host-networked),
+   whereas a baremetal config would have the wrong LAPI address. Just
+   replace the placeholder so each `.env` value matches the file that
+   reads it:
+   - `CROWDSEC_BOUNCER_API_KEY` → `API_KEY` in `crowdsec_bouncer.conf`
+   - `CROWDSEC_FW_BOUNCER_API_KEY` → `api_key` in `crowdsec_firewall-bouncer.yaml`
+   - `NGINX_UI_API_KEY` → `[auth] ApiKey` in `nginx-ui/app.ini`
+
+   (Pasting your *old* key strings instead also works — they're just
+   shared secrets — but there's no reconnection benefit since the old
+   LAPI isn't kept, so fresh is cleaner.)
 9. **Restart, then register the web-UI machine.**
    ```bash
    docker compose restart crowdsec
@@ -292,23 +316,36 @@ No custom entrypoint, no clobbering.
 #### Required for the integration to work
 
 If you **import your own `/etc/nginx`** (so nothing is seeded), these are
-the *only* things you must add for the CrowdSec bouncer + VTS + nginx-ui
-to function. Names match a normal Debian baremetal install — nothing
-`buco`-branded:
+the *only* things you must add **to `/etc/nginx`** for the CrowdSec
+bouncer + VTS + nginx-ui to function. Names match a normal Debian
+baremetal install — nothing `buco`-branded:
 
 | File | Why it's required |
 |---|---|
 | `modules-enabled/{10-mod-http-ndk,50-mod-http-lua,70-mod-http-vhost-traffic-status}.conf` — **symlinks** | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). Debian convention: the real one-line files are image-owned at `/usr/share/nginx/modules-available/mod-http-{ndk,lua,vhost-traffic-status}.conf` (like the `.so` files at `/usr/lib/nginx/modules`, outside `/etc/nginx`); `modules-enabled/` holds the numbered symlinks. A seeded `/etc/nginx` gets them automatically. Bring-your-own: create the symlinks yourself — `ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf modules-enabled/10-mod-http-ndk.conf` (likewise `50-…-lua`, `70-…-vhost-traffic-status`). |
 | `include /etc/nginx/modules-enabled/*.conf;` at the **main** context of your `nginx.conf` | `load_module` is only valid in the main context, never `http{}`. Debian's stock `nginx.conf` already has this line; nginx.org's does not — add it once. |
 | `include /etc/nginx/conf.d/*.conf;` inside `http{}` | Standard; pulls in everything below. |
-| `conf.d/crowdsec_nginx.conf` | The CrowdSec bouncer itself. Ships in the bouncer package, **not this repo** — grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .` (it's byte-for-byte the file `apt install crowdsec-nginx-bouncer` installs). |
+| `conf.d/crowdsec_nginx.conf` | Wires the lua bouncer into nginx. Ships in the bouncer package, **not this repo** — grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .` (it's byte-for-byte the file `apt install crowdsec-nginx-bouncer` installs). It *reads* the bouncer's runtime config at `/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf` — a bind mount, **not** an `/etc/nginx` file; see the note below. |
 | `conf.d/realip.conf` | Without it the bouncer sees the Docker gateway IP for every request and is effectively useless (it'd ban/allow the gateway, not real clients). |
-| `conf.d/resolver.conf` | The only docker-ism: lets the bouncer's lua client resolve the `crowdsec` service name. Unneeded on real baremetal where LAPI is `127.0.0.1`. |
+| `conf.d/resolver.conf` | The only docker-ism. Not the usual nginx case: a static `proxy_pass http://name` resolves once at startup via the system resolver (`/etc/resolv.conf`), so it needs no `resolver`. But the bouncer reaches LAPI/AppSec through the **lua cosocket** client (`lua-resty-http`), which **ignores `/etc/resolv.conf`** and resolves hostnames *only* via nginx's `resolver` directive. So `resolver 127.0.0.11;` (Docker's embedded DNS) is mandatory to look up the `crowdsec` service name. Unneeded on baremetal where LAPI is the literal IP `127.0.0.1` (no name to resolve). |
 | `conf.d/vts.conf` | VTS zone + the `:9113/status` HTML dashboard. Drop this (and `70-mod-http-vhost-traffic-status.conf`) if you don't want the traffic dashboard — the bouncer still works without it. |
 
 Everything is in this repo under `conf/` (except `crowdsec_nginx.conf`,
 which is a package file — see above). The repo's `conf/nginx.conf` is
 just a plain reference skeleton; you don't need it if you bring your own.
+
+**Beyond `/etc/nginx` — the bouncers' own runtime config.** The table
+above is the `/etc/nginx` side only. The lua bouncer also reads
+`/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf` and the firewall
+bouncer `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml` — these
+are **not** `/etc/nginx` files, so they're not in the table. They're the
+repo-shipped `crowdsec_bouncer.conf` / `crowdsec_firewall-bouncer.yaml`,
+bind-mounted by `docker-compose.yml` and always present whether or not
+you bring your own `/etc/nginx`. You don't create them; you only set the
+API key in each — see [Path A step 1](#path-a--fresh-install) /
+[Path B step 8](#path-b--migrate-an-existing-install). Without the right
+key there, `crowdsec_nginx.conf` loads fine but the bouncer can't
+authenticate to LAPI.
 
 #### Optional extras
 
@@ -477,6 +514,35 @@ whatever nginx version it ships) and recompiling the lua stack + VTS
 against it. If an upstream change ever breaks compatibility the build
 fails (the last good image keeps running) — so "upgrading" is just
 `docker compose pull && docker compose up -d`.
+
+### Reconciling the bind-mounted bouncer configs
+
+The two bouncer configs are **bind-mounted from the repo**
+(`crowdsec_bouncer.conf`, `crowdsec_firewall-bouncer.yaml`), so they
+**shadow** the image/package defaults — a `pull` updates the bouncer
+*code* but never your static config. Schema drift is rare and usually
+benign (a missing new key just keeps the old default), but a
+renamed/removed/new-required key can change or break behaviour, and the
+build-time `nginx -t` guard does **not** validate bouncer config — it
+surfaces at runtime (check `docker compose logs crowdsec` /
+`crowdsec-firewall-bouncer`). The current upstream default always sits
+at the same path inside the freshly-pulled image, so after a notable
+CrowdSec bump, diff and merge in anything new (keep your `API_KEY` and
+the `crowdsec:8080` / `127.0.0.1:8080` wiring):
+
+```bash
+# nginx bouncer — vs the .deb default baked into the pulled image
+docker run --rm --entrypoint cat ghcr.io/buco7854/nginx:latest \
+  /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf | diff - crowdsec_bouncer.conf
+
+# firewall bouncer — vs the official image's default
+docker run --rm --entrypoint cat crowdsecurity/crowdsec-firewall-bouncer:latest \
+  /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml | diff - crowdsec_firewall-bouncer.yaml
+```
+
+This is the containerised equivalent of baremetal `apt`'s `.dpkg-dist`
+reconciliation — except the reference default is always one `docker run`
+away, never lost.
 
 ## Folder layout
 
