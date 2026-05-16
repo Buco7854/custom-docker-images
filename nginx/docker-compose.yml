@@ -56,7 +56,17 @@ services:
       - /var/log/nginx:/var/log/nginx:ro
     environment:
       - TZ=${TZ}
-      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/linux crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+      # Each collection pulls its own parsers/scenarios/appsec-rules/
+      # contexts/postoverflows, so listing collections is enough — no
+      # need to enumerate sub-items. nginx/http*/wordpress/appsec* are
+      # driven by THIS stack's acquis (nginx logs + the AppSec listener).
+      # linux/sshd/synology-dsm are kept to mirror the reference box but
+      # stay INERT here until you add their log sources to
+      # crowdsec/config/acquis.yaml. appsec-crs/-wordpress rules install
+      # but only the appsec-default inband set (base-config + vpatch-* +
+      # generic-*) is active, since acquis.yaml keeps the stock
+      # crowdsecurity/appsec-default config.
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/http-dos crowdsecurity/wordpress crowdsecurity/whitelist-good-actors crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/appsec-wordpress crowdsecurity/appsec-crs crowdsecurity/linux crowdsecurity/sshd crowdsecurity/synology-dsm
       - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
       - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
     ports:
