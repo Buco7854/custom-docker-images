@@ -78,7 +78,10 @@ services:
       - proxy_net
 
   crowdsec-firewall-bouncer:
-    image: crowdsecurity/crowdsec-firewall-bouncer:latest
+    # CrowdSec publishes NO official firewall-bouncer Docker image (it's a
+    # host package only). This is built from the GPG-verified packagecloud
+    # .deb by this repo — see crowdsec-firewall-bouncer/.
+    image: ghcr.io/buco7854/crowdsec-firewall-bouncer:latest
     container_name: crowdsec-firewall-bouncer
     restart: unless-stopped
     # host network so we can write iptables on the host — the bouncer

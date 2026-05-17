@@ -16,6 +16,12 @@ with CrowdSec (engine + firewall bouncer + web UI) and Certwarden. No
 Prometheus/Grafana — nginx traffic is the VTS HTML dashboard and
 CrowdSec has its own web UI.
 
+> CrowdSec publishes **no official Docker image for the firewall
+> bouncer** (it ships only as a host package). The compose file uses
+> `ghcr.io/buco7854/crowdsec-firewall-bouncer`, built from the
+> GPG-verified packagecloud `.deb` by this repo — see
+> [`../crowdsec-firewall-bouncer/`](../crowdsec-firewall-bouncer).
+
 ## Contents
 
 - [Image](#image)
@@ -549,8 +555,8 @@ the `crowdsec:8080` / `127.0.0.1:8080` wiring):
 docker run --rm --entrypoint cat ghcr.io/buco7854/nginx:latest \
   /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf | diff - crowdsec_bouncer.conf
 
-# firewall bouncer — vs the official image's default
-docker run --rm --entrypoint cat crowdsecurity/crowdsec-firewall-bouncer:latest \
+# firewall bouncer — vs the .deb default baked into the pulled image
+docker run --rm --entrypoint cat ghcr.io/buco7854/crowdsec-firewall-bouncer:latest \
   /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml | diff - crowdsec_firewall-bouncer.yaml
 ```
 
