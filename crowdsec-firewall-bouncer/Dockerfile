@@ -23,19 +23,22 @@
 # `mode:` in the yaml) — then nftables is the dep instead.
 #
 # Host-firewall caveat: the in-container iptables manipulates the SHARED
-# host kernel netfilter. Debian bookworm's iptables uses the nft backend
+# host kernel netfilter. Debian trixie's iptables uses the nft backend
 # (iptables-nft); this matches a modern host. On a legacy-backend host,
 # rebuild with the nftables flavour or run iptables-legacy on the host.
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Same packagecloud signing key as the nginx image's CrowdSec bouncer
 # step — asserted below so a key rotation fails the build LOUDLY instead
 # of silently trusting a new key.
 ARG CROWDSEC_GPG_FINGERPRINT=6A89E3C2303A901A889971D3376ED5326E93CD0C
-# packagecloud doesn't track every Debian release; bookworm is the one
-# the nginx image already targets and the bouncer .deb is a static Go
-# binary, so the exact release it was built for is irrelevant.
+# This is the packagecloud APT repo release, deliberately DECOUPLED from
+# the trixie base above: CrowdSec's packagecloud doesn't track every
+# Debian release (no trixie repo), and the bouncer .deb is a static Go
+# binary, so the release it was built for is irrelevant to the trixie
+# runtime — it runs identically. The build-time `-V` smoke test proves
+# it on the trixie base before the image ships.
 ARG CROWDSEC_DEBIAN_RELEASE=bookworm
 # iptables (matches the stack's `mode: iptables`) or nftables.
 ARG CS_FW_BOUNCER_FLAVOR=iptables

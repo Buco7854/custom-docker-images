@@ -37,7 +37,7 @@ Same supply-chain posture as this repo's nginx image:
 |-----|---------|---------|
 | `CS_FW_BOUNCER_FLAVOR`     | `iptables` | `iptables` or `nftables`. nftables also needs `mode: nftables` in the bouncer yaml. |
 | `CS_FW_BOUNCER_VERSION`    | *(empty)*  | Pin a reproducible build, e.g. `0.0.31`. Empty tracks the repo's current. |
-| `CROWDSEC_DEBIAN_RELEASE`  | `bookworm` | packagecloud release the `.deb` is fetched from. |
+| `CROWDSEC_DEBIAN_RELEASE`  | `bookworm` | packagecloud APT release the `.deb` is fetched from — **decoupled** from the `debian:trixie-slim` base (CrowdSec publishes no trixie repo; the bouncer is a static Go binary that runs identically on trixie). |
 | `CROWDSEC_GPG_FINGERPRINT` | pinned     | Asserted against CrowdSec's packagecloud signing key. |
 
 ## Usage
@@ -60,7 +60,7 @@ docker run -d --name crowdsec-firewall-bouncer \
 ## Host-firewall caveat
 
 The in-container `iptables` manipulates the **shared host kernel**
-netfilter. Debian bookworm's `iptables` uses the nft backend
+netfilter. Debian trixie's `iptables` uses the nft backend
 (`iptables-nft`), which matches a modern host. On a legacy-backend host
 the rules may land in the wrong table — rebuild with the nftables
 flavour (`--build-arg CS_FW_BOUNCER_FLAVOR=nftables`, plus
