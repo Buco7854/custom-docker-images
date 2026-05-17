@@ -230,17 +230,21 @@ COPY --from=builder /assets/luaresty/              /usr/local/share/lua/5.1/
 COPY --from=assets  /assets/luatree/share/lua/5.1/ /usr/local/share/lua/5.1/
 COPY --from=assets  /assets/luatree/lib/lua/5.1/   /usr/local/lib/lua/5.1/
 
-COPY image/app.ini /etc/nginx-ui/app.ini
+# No baked app.ini: nginx-ui auto-generates a full /etc/nginx-ui/
+# app.ini + database.db on first start and runs fine. The compose
+# bind-mounts /etc/nginx-ui so it persists; set [auth] ApiKey there
+# after first start (README Path A step 3).
 
 # Seed our drop-ins into the base's config TEMPLATE (/usr/local/etc/
 # nginx). The base's `init-config` s6 oneshot copies the template into
 # /etc/nginx ONLY when /etc/nginx is empty, and never touches an existing
 # config — we inherit exactly that, no custom entrypoint. Only what the
 # bouncer/nginx-ui REQUIRE is seeded (real-IP, resolver, load_module
-# symlinks). The VTS *zone* config is opt-in (an example under
-# image/conf/optional/) — but its load_module symlink IS seeded, so the
-# module is loaded-but-inert until you add a zone. User-policy extras
-# likewise stay in image/conf/optional/. Debian convention: real
+# symlinks). The VTS *zone* config is opt-in (a hand-copied example,
+# example/nginx/optional/) — but its load_module symlink IS seeded, so
+# the module is loaded-but-inert until you add a zone. User-policy
+# extras likewise are opt-in examples, never baked. Debian convention:
+# real
 # load_module files are image-owned at /usr/share/nginx/modules-available
 # (like the .so, outside /etc/nginx); modules-enabled holds numbered
 # symlinks (NDK 10- before lua 50-; VTS 90- independent).

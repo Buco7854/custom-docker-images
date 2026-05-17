@@ -16,7 +16,7 @@ This folder is split so it's obvious what belongs where:
 | Path | What it is |
 |---|---|
 | `Dockerfile` | builds `ghcr.io/buco7854/nginx` |
-| `image/` | **baked into the image** (nginx-ui `app.ini`, VTS `status.html`, seed `conf/`) — the build's only inputs |
+| `image/` | **baked into the image** (VTS `status.html` + the seed `conf/`) — the build's only inputs |
 | `example/` | a **ready-to-run compose stack** (NOT used by the build): nginx + CrowdSec (engine + firewall bouncer + web UI) + Certwarden |
 
 > CrowdSec publishes **no official Docker image for the firewall
@@ -112,12 +112,13 @@ default nginx + nginx-ui + CrowdSec bouncer + VTS config into it.
    ```
    The `BOUNCER_KEY_*` env vars auto-register both bouncer keys with
    LAPI on first start.
-3. **Set the nginx-ui reload key.** `nginx/nginx-ui/app.ini` exists
-   after the first start — set its `[auth] ApiKey` to your `.env`'s
+3. **Set the nginx-ui reload key.** nginx-ui auto-generates
+   `nginx/nginx-ui/app.ini` (+ its DB) on first start and it persists
+   in that bind mount. Add an `[auth] ApiKey` set to your `.env`'s
    `NGINX_UI_API_KEY` (Certwarden uses it to trigger reloads), then
    reload:
    ```bash
-   $EDITOR nginx/nginx-ui/app.ini           # [auth] ApiKey = NGINX_UI_API_KEY
+   $EDITOR nginx/nginx-ui/app.ini           # add under [auth]:  ApiKey = NGINX_UI_API_KEY
    docker compose restart nginx
    ```
 4. **Register the web-UI machine account.** The CrowdSec web UI
@@ -167,7 +168,8 @@ Steps:
 1. **Put your nginx tree in `nginx/conf`.** Drop your existing
    Debian-style config (`nginx.conf`, `conf.d/`, `sites-available/`,
    `sites-enabled/`, `snippets/`, …) into `nginx/conf`. Non-empty ⇒
-   the container uses it verbatim; you don't need the seed `nginx.conf`.
+   the container uses it verbatim (the image only seeds a default
+   `nginx.conf` into an *empty* `nginx/conf`).
 2. **Make your `nginx.conf` load the modules.** Ensure it has, at the
    **main** context, `include /etc/nginx/modules-enabled/*.conf;`
    (Debian's stock `nginx.conf` already does; nginx.org's does not) and,
@@ -331,10 +333,10 @@ untouched, so to customise one just ship your own):
 | `conf.d/realip.conf` | Without it the bouncer sees the Docker gateway IP for every request (it'd ban/allow the gateway, not real clients). |
 | `conf.d/resolver.conf` | The only docker-ism. A static `proxy_pass http://name` resolves once at startup via `/etc/resolv.conf` — but the bouncer reaches LAPI/AppSec via the **lua cosocket** client, which **ignores `/etc/resolv.conf`** and resolves only via nginx's `resolver`. So `resolver 127.0.0.11;` (Docker DNS) is mandatory to look up `crowdsec`. Unneeded on baremetal where LAPI is the literal IP `127.0.0.1`. |
 
-Everything is in this repo under `image/conf/` (except
-`crowdsec_nginx.conf`, a package file — see above). `image/conf/nginx.conf`
-is just a plain reference skeleton; you don't need it if you bring your
-own.
+The seeded drop-ins live in this repo under `image/conf/` (except
+`crowdsec_nginx.conf`, baked from the `.deb` — see above). `image/`
+holds **only** what the Dockerfile bakes; `nginx.conf` itself is the
+base image's own (not shipped here).
 
 **Beyond `/etc/nginx` — the bouncers' own runtime config.** The table is
 the `/etc/nginx` side only. The lua bouncer also reads
@@ -349,8 +351,9 @@ authenticate to LAPI.
 
 #### Optional extras
 
-Shipped as examples under `image/conf/optional/`, **not** seeded — copy
-into your `/etc/nginx/` (`nginx/conf/`) only if you want them:
+Shipped as examples under `example/nginx/optional/`, **not** baked or
+seeded — copy into your nginx config (`nginx/conf/`) only if you want
+them:
 
 - `optional/conf.d/ratelimit.conf` + `optional/snippets/ratelimit.conf`
   — connection/request rate-limit zones, opted into per-server with
@@ -558,20 +561,14 @@ nginx/
 ├── Dockerfile                 # builds ghcr.io/buco7854/nginx
 ├── .dockerignore              # keeps example/ out of the build context
 ├── README.md
-├── image/                     # ── BAKED INTO THE IMAGE ──
-│   ├── app.ini                # minimal nginx-ui config
+├── image/                     # ── BAKED INTO THE IMAGE (only these) ──
 │   ├── status.html            # custom VTS dashboard
 │   └── conf/                  # seeded into /etc/nginx if empty
-│       ├── nginx.conf         # plain skeleton (from-scratch only)
-│       ├── mime.types
 │       ├── modules-available/{mod-http-ndk,mod-http-lua,
 │       │                      mod-http-vhost-traffic-status}.conf
 │       │                        # image symlinks these into modules-enabled/
-│       ├── conf.d/{realip,resolver}.conf
-│       │                        # crowdsec_nginx.conf comes from the .deb
-│       └── optional/          # NOT seeded — opt-in examples:
-│           ├── conf.d/{ratelimit, vhost-traffic-status}.conf
-│           └── snippets/{ratelimit, security-txt}.conf
+│       └── conf.d/{realip,resolver}.conf
+│                                # crowdsec_nginx.conf comes from the .deb
 └── example/                   # ── RUNNABLE STACK (not built) ──
     │                          #    one dir per service; (rt) = runtime,
     │                          #    auto-created on first `up`
@@ -581,6 +578,9 @@ nginx/
     │   ├── crowdsec-nginx-bouncer.conf   # tracked — set API_KEY
     │   ├── maintenance_nginx_ui.sh       # tracked — host cron helper
     │   ├── www/well-known/security.txt   # tracked sample → /var/www
+    │   ├── optional/                     # tracked — opt-in snippets:
+    │   │   ├── conf.d/{ratelimit, vhost-traffic-status}.conf
+    │   │   └── snippets/{ratelimit, security-txt}.conf
     │   ├── conf/                         # (rt) → /etc/nginx (seeded)
     │   ├── logs/                         # (rt) → /var/log/nginx
     │   └── nginx-ui/                     # (rt) → /etc/nginx-ui

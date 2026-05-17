@@ -1,7 +1,5 @@
-# Build context is ./nginx but the Dockerfile only bakes parts of
-# image/. Keep the example stack, docs, and the opt-in extras (never
-# baked — copied by hand into a deployment) out of the context.
+# Build context is ./nginx but the Dockerfile only needs image/.
+# Keep the example stack and docs out of the build context.
 example/
 README.md
 .dockerignore
-image/conf/optional/
