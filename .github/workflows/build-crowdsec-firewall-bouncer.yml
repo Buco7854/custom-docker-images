@@ -1,0 +1,68 @@
+name: Build crowdsec-firewall-bouncer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crowdsec-firewall-bouncer/**'
+      - '.github/workflows/build-crowdsec-firewall-bouncer.yml'
+  schedule:
+    # Weekly — Sunday 00:00 UTC, same cadence as the nginx image so the
+    # whole CrowdSec stack refreshes together. Picks up the latest
+    # firewall-bouncer .deb from CrowdSec's packagecloud repo.
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase owner
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.OWNER }}/crowdsec-firewall-bouncer
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=crowdsec-firewall-bouncer
+            org.opencontainers.image.description=CrowdSec firewall bouncer (iptables) from the official packagecloud .deb — upstream publishes no Docker image
+
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./crowdsec-firewall-bouncer
+          file: ./crowdsec-firewall-bouncer/Dockerfile
+          pull: true
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ env.OWNER }}/crowdsec-firewall-bouncer:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ env.OWNER }}/crowdsec-firewall-bouncer:buildcache,mode=max

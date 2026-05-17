@@ -78,16 +78,20 @@ services:
       - proxy_net
 
   crowdsec-firewall-bouncer:
-    image: crowdsecurity/crowdsec-firewall-bouncer:latest
+    # CrowdSec publishes NO official firewall-bouncer Docker image (it's a
+    # host package only). This is built from the GPG-verified packagecloud
+    # .deb by this repo — see crowdsec-firewall-bouncer/.
+    image: ghcr.io/buco7854/crowdsec-firewall-bouncer:latest
     container_name: crowdsec-firewall-bouncer
     restart: unless-stopped
     # host network so we can write iptables on the host — the bouncer
     # reaches LAPI via 127.0.0.1:8080 (published above by the crowdsec
     # service on loopback).
     network_mode: host
+    # NET_ADMIN only: the bouncer just edits iptables/ipset (netlink,
+    # CAP_NET_ADMIN). It opens no raw sockets, so NET_RAW is not needed.
     cap_add:
       - NET_ADMIN
-      - NET_RAW
     volumes:
       - ./crowdsec_firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
     depends_on:
