@@ -40,7 +40,7 @@ services:
       - /var/log/nginx:/var/log/nginx
       - /etc/ssl/domains:/etc/ssl/domains:ro
       - ./nginx-ui:/etc/nginx-ui                                  # nginx-ui sqlite DB + app.ini
-      - ./crowdsec_bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+      - ./crowdsec_nginx-bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
       - /var/www:/var/www                                         # static files (security.txt etc.)
     environment:
       - TZ=${TZ}

@@ -7,7 +7,7 @@ labels:
   type: nginx
 ---
 # AppSec listener — the nginx Lua bouncer forwards requests here for
-# WAF evaluation (see APPSEC_URL in crowdsec_bouncer.conf). The port
+# WAF evaluation (see APPSEC_URL in crowdsec_nginx-bouncer.conf). The port
 # binds 0.0.0.0 because the bouncer reaches it over the proxy_net
 # compose network (NOT loopback — 127.0.0.1 here would be a baremetal-
 # ism that breaks in the container); it is never published to the host.

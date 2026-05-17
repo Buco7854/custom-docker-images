@@ -92,7 +92,7 @@ default nginx + nginx-ui + CrowdSec bouncer + VTS config into it.
 1. **Match the bouncer API keys.** The same value must appear on both
    sides — the `.env` var and the bouncer-side config file:
    ```bash
-   $EDITOR crowdsec_bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
+   $EDITOR crowdsec_nginx-bouncer.conf            # API_KEY = CROWDSEC_BOUNCER_API_KEY
    $EDITOR crowdsec_firewall-bouncer.yaml   # api_key = CROWDSEC_FW_BOUNCER_API_KEY
    ```
 2. **Bring it up.**
@@ -215,7 +215,7 @@ Steps:
    nothing is checked against the old install.
 
    The two bouncer config files themselves **ship in the repo**
-   (`crowdsec_bouncer.conf`, `crowdsec_firewall-bouncer.yaml`) — `git
+   (`crowdsec_nginx-bouncer.conf`, `crowdsec_firewall-bouncer.yaml`) — `git
    clone` already gave you them, bind-mounted into the containers and
    pre-wired for this stack's network with `REPLACE_WITH_…` placeholder
    keys. You do **not** create or generate them, and you should **not**
@@ -225,7 +225,7 @@ Steps:
    whereas a baremetal config would have the wrong LAPI address. Just
    replace the placeholder so each `.env` value matches the file that
    reads it:
-   - `CROWDSEC_BOUNCER_API_KEY` → `API_KEY` in `crowdsec_bouncer.conf`
+   - `CROWDSEC_BOUNCER_API_KEY` → `API_KEY` in `crowdsec_nginx-bouncer.conf`
    - `CROWDSEC_FW_BOUNCER_API_KEY` → `api_key` in `crowdsec_firewall-bouncer.yaml`
    - `NGINX_UI_API_KEY` → `[auth] ApiKey` in `nginx-ui/app.ini`
 
@@ -359,7 +359,7 @@ above is the `/etc/nginx` side only. The lua bouncer also reads
 `/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf` and the firewall
 bouncer `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml` — these
 are **not** `/etc/nginx` files, so they're not in the table. They're the
-repo-shipped `crowdsec_bouncer.conf` / `crowdsec_firewall-bouncer.yaml`,
+repo-shipped `crowdsec_nginx-bouncer.conf` / `crowdsec_firewall-bouncer.yaml`,
 bind-mounted by `docker-compose.yml` and always present whether or not
 you bring your own `/etc/nginx`. You don't create them; you only set the
 API key in each — see [Path A step 1](#path-a--fresh-install) /
@@ -538,7 +538,7 @@ fails (the last good image keeps running) — so "upgrading" is just
 ### Reconciling the bind-mounted bouncer configs
 
 The two bouncer configs are **bind-mounted from the repo**
-(`crowdsec_bouncer.conf`, `crowdsec_firewall-bouncer.yaml`), so they
+(`crowdsec_nginx-bouncer.conf`, `crowdsec_firewall-bouncer.yaml`), so they
 **shadow** the image/package defaults — a `pull` updates the bouncer
 *code* but never your static config. Schema drift is rare and usually
 benign (a missing new key just keeps the old default), but a
@@ -553,7 +553,7 @@ the `crowdsec:8080` / `127.0.0.1:8080` wiring):
 ```bash
 # nginx bouncer — vs the .deb default baked into the pulled image
 docker run --rm --entrypoint cat ghcr.io/buco7854/nginx:latest \
-  /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf | diff - crowdsec_bouncer.conf
+  /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf | diff - crowdsec_nginx-bouncer.conf
 
 # firewall bouncer — vs the .deb default baked into the pulled image
 docker run --rm --entrypoint cat ghcr.io/buco7854/crowdsec-firewall-bouncer:latest \
@@ -589,7 +589,7 @@ nginx/
 │   └── optional/             # NOT seeded — opt-in examples (see README)
 │       ├── conf.d/ratelimit.conf
 │       └── snippets/{ratelimit.conf, security-txt.conf}
-├── crowdsec_bouncer.conf                  # nginx Lua bouncer (mounted into nginx)
+├── crowdsec_nginx-bouncer.conf                  # nginx Lua bouncer (mounted into nginx)
 ├── crowdsec_firewall-bouncer.yaml         # firewall bouncer (mounted into firewall-bouncer)
 ├── crowdsec_config/                       # mounted into the crowdsec container (/etc/crowdsec)
 │   ├── acquis.yaml                        # nginx logs + AppSec listener (stock appsec-default)
