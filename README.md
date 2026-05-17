@@ -11,11 +11,13 @@ Automated Docker image builder. Builds and publishes images to GHCR on a daily s
 ## Custom Postgres images
 | Tag | Base | Extras |
 |-----|------|--------|
-| `15-cron` | postgres:15-bookworm | pg_cron |
-| `15-cron-bktree` | postgres:15-bookworm | pg_cron + bktree |
-| `16-cron` | postgres:16-bookworm | pg_cron |
-| `18-bktree` | postgres:18-bookworm | bktree |
+| `15-cron` | postgres:15-trixie | pg_cron |
+| `15-cron-bktree` | postgres:15-trixie | pg_cron + bktree |
+| `16-cron` | postgres:16-trixie | pg_cron |
+| `18-bktree` | postgres:18-trixie | bktree |
 To add a new image, just create a new folder under `postgres/` with a `Dockerfile` — it will be picked up automatically on the next run.
+
+> **Collation caveat (bookworm → trixie):** these moved from a bookworm base to trixie, which bumps glibc (2.36 → 2.41) and ICU (72 → 76). The text collation order changes between those versions, so a `PGDATA` volume **first created on the old bookworm image** will log a `collation version mismatch` warning and may have subtly wrong results / unique-constraint violations on collated (text) indexes until you `REINDEX`. Fresh volumes are unaffected. On an existing volume, after pulling the trixie image run, per database: `REINDEX DATABASE <db>;` then `ALTER DATABASE <db> REFRESH COLLATION VERSION;` (and the same for `template1`). No action needed for new deployments.
 
 ## nginx
 [`uozi/nginx-ui`](https://hub.docker.com/r/uozi/nginx-ui) with two dynamic modules added to its stock nginx: Debian's lua module (so the [CrowdSec lua bouncer](https://github.com/crowdsecurity/cs-nginx-bouncer) runs) and a compiled [nginx-module-vts](https://github.com/vozlt/nginx-module-vts) serving a custom HTML traffic dashboard (no Prometheus output). No OpenResty — its apt repo lags Debian releases by many months. Published to GHCR as `ghcr.io/buco7854/nginx`. See [`nginx/`](./nginx) for the Dockerfile, image-specific README, and a ready-to-run `docker-compose.yml` (nginx + crowdsec + firewall bouncer + web UI + certwarden).

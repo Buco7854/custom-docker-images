@@ -1,4 +1,4 @@
-FROM postgres:18-bookworm
+FROM postgres:18-trixie
 
 RUN apt update && \
     imageDeps='' && \

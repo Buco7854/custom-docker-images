@@ -1,4 +1,4 @@
-FROM postgres:15-bookworm
+FROM postgres:15-trixie
 
 RUN apt update && \
     imageDeps='postgresql-15-cron' && \
