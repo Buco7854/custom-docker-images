@@ -178,8 +178,16 @@ RUN set -eux; \
         || { echo "FATAL: VTS HTML dashboard header is empty (tplToDefine.sh failed)" >&2; exit 1; }; \
     \
     # NDK must precede lua-nginx-module in the configure order.
+    # --with-http_ssl_module is REQUIRED even though the module loads
+    # into an ssl-enabled nginx at runtime: lua-nginx-module gates its
+    # lua_ssl_* directives (lua_ssl_trusted_certificate, ...) and TLS
+    # cosocket support behind NGX_HTTP_SSL at COMPILE time. --with-compat
+    # standardises the ABI signature but does NOT define NGX_HTTP_SSL, so
+    # without this the built module silently lacks lua_ssl_trusted_-
+    # certificate and nginx rejects the CrowdSec bouncer snippet
+    # ("unknown directive lua_ssl_trusted_certificate") at runtime.
     cd "nginx-${NGX_VER}"; \
-    ./configure --with-compat \
+    ./configure --with-compat --with-http_ssl_module \
         --add-dynamic-module=/tmp/ndk \
         --add-dynamic-module=/tmp/lua-nginx-module \
         --add-dynamic-module=/tmp/vts; \
@@ -393,11 +401,12 @@ RUN set -eux; \
       echo "load_module $MODPATH/ngx_http_vhost_traffic_status_module.so;"; \
       echo "events{}"; \
       echo "http{ vhost_traffic_status_zone; lua_shared_dict d 1m;"; \
+      echo "      lua_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;"; \
       echo "      init_by_lua_block { require 'resty.http'; require 'resty.string'; require 'cjson' } }"; \
     } > /tmp/probe.conf; \
     nginx -t -c /tmp/probe.conf; \
     rm /tmp/probe.conf; \
-    echo "modules load + lua deps resolve — OK"
+    echo "modules load + lua ssl + deps resolve — OK"
 
 EXPOSE 80 443 9000 9113
 
