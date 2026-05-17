@@ -304,14 +304,28 @@ behaviour exactly:
   real-IP, resolver, the `load_module` lines). User-policy config
   (rate-limiting, `security.txt`) is **not** seeded — it's your choice
   (see [Optional extras](#optional-extras)).
-- **Existing `/etc/nginx`** (your bind-mounted config) → **nothing is
-  touched.** Your config is used verbatim.
+- **Existing `/etc/nginx`** (your bind-mounted config) → **your files
+  are never touched.** The one scoped addition: if `modules-enabled/`
+  is empty or absent, the integration's three symlinks are created
+  there (the `load_module` lines the bouncer/VTS need). A `modules-enabled/`
+  you populate yourself is left alone.
 
 This works because we enrich the base's config *template*
 (`/usr/local/etc/nginx`); the base's `init-config` s6 oneshot runs
 before nginx and only does
 `[ -z "$(ls -A /etc/nginx)" ] && cp -rp /usr/local/etc/nginx/* /etc/nginx/`.
 No custom entrypoint, no clobbering.
+
+The one deliberate exception to *seed-only-if-`/etc/nginx`-empty*: a
+second s6 oneshot, `ensure-modules-enabled` (ordered **after**
+`init-config`, **before** nginx), recreates the `modules-enabled/`
+symlinks when **that directory** is empty or absent — even on a
+populated bring-your-own `/etc/nginx`, where `init-config` does nothing.
+It's still seed-if-empty + never-clobber, just at `modules-enabled/`
+granularity: a non-empty `modules-enabled/` (your own files, or a
+deliberately removed symlink like vts) is left untouched. It never
+edits your `nginx.conf` — you still add the
+`include /etc/nginx/modules-enabled/*.conf;` line yourself.
 
 #### Required for the integration to work
 
@@ -322,13 +336,13 @@ baremetal install — nothing `buco`-branded:
 
 | File | Why it's required |
 |---|---|
-| `modules-enabled/{10-mod-http-ndk,50-mod-http-lua,70-mod-http-vhost-traffic-status}.conf` — **symlinks** | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). Debian convention: the real one-line files are image-owned at `/usr/share/nginx/modules-available/mod-http-{ndk,lua,vhost-traffic-status}.conf` (like the `.so` files at `/usr/lib/nginx/modules`, outside `/etc/nginx`); `modules-enabled/` holds the numbered symlinks. A seeded `/etc/nginx` gets them automatically. Bring-your-own: create the symlinks yourself — `ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf modules-enabled/10-mod-http-ndk.conf` (likewise `50-…-lua`, `70-…-vhost-traffic-status`). |
+| `modules-enabled/{10-mod-http-ndk,50-mod-http-lua,90-mod-http-vhost-traffic-status}.conf` — **symlinks** | `load_module` for NDK+lua (the bouncer) and VTS (the dashboard). Debian convention: the real one-line files are image-owned at `/usr/share/nginx/modules-available/mod-http-{ndk,lua,vhost-traffic-status}.conf` (like the `.so` files at `/usr/lib/nginx/modules`, outside `/etc/nginx`); `modules-enabled/` holds the numbered symlinks (NDK `10-` must precede lua `50-`; VTS `90-` is independent). **Auto-created on container start** whenever `modules-enabled/` is empty or absent — including a populated bring-your-own `/etc/nginx` (the `ensure-modules-enabled` oneshot). You only create them by hand if you manage a **non-empty** `modules-enabled/` yourself (it's then left untouched): add ours alongside — `ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf modules-enabled/10-mod-http-ndk.conf` (likewise `50-…-lua`, `90-…-vhost-traffic-status`). Either way your `nginx.conf` still needs the `include` line (next row). |
 | `include /etc/nginx/modules-enabled/*.conf;` at the **main** context of your `nginx.conf` | `load_module` is only valid in the main context, never `http{}`. Debian's stock `nginx.conf` already has this line; nginx.org's does not — add it once. |
 | `include /etc/nginx/conf.d/*.conf;` inside `http{}` | Standard; pulls in everything below. |
 | `conf.d/crowdsec_nginx.conf` | Wires the lua bouncer into nginx. Ships in the bouncer package, **not this repo** — grab it from a seeded run: `docker cp nginx:/etc/nginx/conf.d/crowdsec_nginx.conf .` (it's byte-for-byte the file `apt install crowdsec-nginx-bouncer` installs). It *reads* the bouncer's runtime config at `/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf` — a bind mount, **not** an `/etc/nginx` file; see the note below. |
 | `conf.d/realip.conf` | Without it the bouncer sees the Docker gateway IP for every request and is effectively useless (it'd ban/allow the gateway, not real clients). |
 | `conf.d/resolver.conf` | The only docker-ism. Not the usual nginx case: a static `proxy_pass http://name` resolves once at startup via the system resolver (`/etc/resolv.conf`), so it needs no `resolver`. But the bouncer reaches LAPI/AppSec through the **lua cosocket** client (`lua-resty-http`), which **ignores `/etc/resolv.conf`** and resolves hostnames *only* via nginx's `resolver` directive. So `resolver 127.0.0.11;` (Docker's embedded DNS) is mandatory to look up the `crowdsec` service name. Unneeded on baremetal where LAPI is the literal IP `127.0.0.1` (no name to resolve). |
-| `conf.d/vts.conf` | VTS zone + the `:9113/status` HTML dashboard. Drop this (and `70-mod-http-vhost-traffic-status.conf`) if you don't want the traffic dashboard — the bouncer still works without it. |
+| `conf.d/vts.conf` | VTS zone + the `:9113/status` HTML dashboard. Drop this (and `90-mod-http-vhost-traffic-status.conf`) if you don't want the traffic dashboard — the bouncer still works without it. |
 
 Everything is in this repo under `conf/` (except `crowdsec_nginx.conf`,
 which is a package file — see above). The repo's `conf/nginx.conf` is

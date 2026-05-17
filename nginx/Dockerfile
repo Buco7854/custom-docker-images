@@ -328,13 +328,56 @@ RUN set -eux; \
     ln -s /usr/share/nginx/modules-available/mod-http-lua.conf \
           /usr/local/etc/nginx/modules-enabled/50-mod-http-lua.conf; \
     ln -s /usr/share/nginx/modules-available/mod-http-vhost-traffic-status.conf \
-          /usr/local/etc/nginx/modules-enabled/70-mod-http-vhost-traffic-status.conf; \
+          /usr/local/etc/nginx/modules-enabled/90-mod-http-vhost-traffic-status.conf; \
     test -f /usr/local/etc/nginx/nginx.conf; \
     if ! grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf; then \
         sed -i '1i include /etc/nginx/modules-enabled/*.conf;' \
             /usr/local/etc/nginx/nginx.conf; \
     fi; \
     grep -q 'modules-enabled' /usr/local/etc/nginx/nginx.conf
+
+# The base's init-config oneshot only seeds a WHOLLY empty /etc/nginx —
+# a bring-your-own (populated) /etc/nginx therefore never gets the
+# modules-enabled symlinks, so the bouncer/VTS load_module lines are
+# missing. Add an s6 oneshot, ordered AFTER init-config and BEFORE
+# nginx (init-config -> ensure-modules-enabled -> nginx), that recreates
+# them when modules-enabled/ is empty or absent — even on a populated
+# /etc/nginx. Scoped to that one dir and only when empty, so a config
+# the user manages (e.g. a deliberately removed vts symlink) is never
+# clobbered. s6-native: no custom entrypoint. Generated in-build so the
+# script is LF regardless of the (Windows) checkout. Fails the build
+# loudly if the base ever renames the services we wire into.
+RUN <<'EOF'
+set -eux
+S6=/etc/s6-overlay/s6-rc.d
+test -d "$S6/init-config"
+test -d "$S6/nginx"
+test -f "$S6/nginx/dependencies.d/init-config"
+test -d "$S6/user/contents.d"
+SVC="$S6/ensure-modules-enabled"
+mkdir -p "$SVC/dependencies.d"
+printf 'oneshot\n' > "$SVC/type"
+printf '%s\n' "$SVC/ensure-modules-enabled.sh" > "$SVC/up"
+: > "$SVC/dependencies.d/init-config"
+: > "$S6/nginx/dependencies.d/ensure-modules-enabled"
+: > "$S6/user/contents.d/ensure-modules-enabled"
+cat > "$SVC/ensure-modules-enabled.sh" <<'SCRIPT'
+#!/bin/bash
+# Seed the modules-enabled symlinks if that dir is empty/absent — even
+# when /etc/nginx is a populated bring-your-own bind mount (the base
+# init-config only seeds a WHOLLY empty /etc/nginx). Scoped to this one
+# dir and only when empty, so a config the user manages (e.g. a
+# deliberately removed vts symlink) is never clobbered.
+if [ -z "$(ls -A /etc/nginx/modules-enabled 2>/dev/null)" ]; then
+    mkdir -p /etc/nginx/modules-enabled
+    ln -s /usr/share/nginx/modules-available/mod-http-ndk.conf /etc/nginx/modules-enabled/10-mod-http-ndk.conf
+    ln -s /usr/share/nginx/modules-available/mod-http-lua.conf /etc/nginx/modules-enabled/50-mod-http-lua.conf
+    ln -s /usr/share/nginx/modules-available/mod-http-vhost-traffic-status.conf /etc/nginx/modules-enabled/90-mod-http-vhost-traffic-status.conf
+    echo "[INFO] modules-enabled seeded (ndk/lua/vts symlinks)"
+fi
+SCRIPT
+chmod +x "$SVC/ensure-modules-enabled.sh"
+EOF
 
 # Build-time guard: load all three modules + open a VTS zone + run an
 # init_by_lua that requires the bouncer's lua deps. init_by_lua forces
