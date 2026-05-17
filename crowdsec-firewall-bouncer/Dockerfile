@@ -5,7 +5,7 @@
 # package (deb/rpm) because it rewrites the host firewall, so a container
 # was never the upstream-supported shape. This stack's
 # docker-compose.yml needs it as a container anyway (network_mode: host +
-# NET_ADMIN/NET_RAW so it can write the host's iptables), so we build one
+# NET_ADMIN so it can write the host's iptables), so we build one
 # — the compose file previously pointed at a `crowdsecurity/...` image
 # that has never existed on any registry.
 #
@@ -106,7 +106,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/deb /tmp/bouncer /tmp/cs.key \
            /etc/apt/sources.list.d/crowdsec.list /usr/share/keyrings/crowdsec.gpg
 
-# One process, no systemd/s6. network_mode: host + NET_ADMIN/NET_RAW
+# One process, no systemd/s6. network_mode: host + NET_ADMIN
 # (set by docker-compose.yml) let it rewrite the host's iptables. The
 # config path matches the stack's bind mount; override CMD if you bind
 # the config somewhere else.
