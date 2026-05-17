@@ -10,7 +10,7 @@
 # exec` so we don't need to know the host bind path.
 #
 # Install:
-#   sudo cp scripts/maintenance_nginx_ui.sh /usr/local/bin/
+#   sudo cp nginx/maintenance_nginx_ui.sh /usr/local/bin/
 #   sudo chmod +x /usr/local/bin/maintenance_nginx_ui.sh
 #   echo "0 4 * * * root /usr/local/bin/maintenance_nginx_ui.sh \
 #       >> /var/log/maintenance_nginx_ui.log 2>&1" \

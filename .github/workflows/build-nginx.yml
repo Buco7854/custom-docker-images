@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'nginx/**'
+      # Only the image inputs — changes under nginx/example/ (the
+      # runnable stack) don't affect the image, so they don't rebuild.
+      - 'nginx/Dockerfile'
+      - 'nginx/image/**'
       - '.github/workflows/build-nginx.yml'
   schedule:
     # Weekly — Sunday 00:00 UTC. Picks up uozi/nginx-ui:latest and

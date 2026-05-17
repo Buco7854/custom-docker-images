@@ -4,11 +4,12 @@
 !.env.example
 !**/.env.example
 
-# Runtime/state dirs created by the compose stack
-nginx/nginx-ui/
-nginx/crowdsec_data/
-nginx/crowdsec-web-ui/
-nginx/certwarden_data/
-nginx/prometheus/data/
-nginx/grafana/data/
-nginx/data/
+# Runtime state created by the nginx example stack (per-service dirs;
+# this repo is CI/docs only — never actually deployed from here)
+nginx/example/nginx/conf/
+nginx/example/nginx/logs/
+nginx/example/nginx/nginx-ui/
+nginx/example/crowdsec/data/
+nginx/example/crowdsec-web-ui/data/
+nginx/example/certwarden/data/
+nginx/example/certwarden/certs/

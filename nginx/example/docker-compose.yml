@@ -1,0 +1,147 @@
+# Homelab reverse-proxy stack: nginx (+lua CrowdSec bouncer +VTS +nginx-ui)
+# · crowdsec (LAPI + AppSec) · crowdsec-firewall-bouncer · crowdsec-web-ui
+# · certwarden. nginx traffic = the VTS dashboard at :9113/status; CrowdSec
+# has its own web UI — no Prometheus/Grafana.
+#
+# Layout: one directory per service (paths are relative to THIS file).
+# Each service owns what it produces; shared mounts point at the owner:
+#   nginx/      conf/ (→ /etc/nginx, seeded if empty), logs/, nginx-ui/,
+#               www/, crowdsec-nginx-bouncer.conf (tracked — set API_KEY)
+#   crowdsec/   conf/ (tracked — acquis/profiles/whitelists), data/
+#   crowdsec-firewall-bouncer/  crowdsec-firewall-bouncer.yaml (tracked)
+#   crowdsec-web-ui/  data/
+#   certwarden/ data/, certs/ (nginx reads RO), scripts/ (issuance hook)
+# Runtime dirs are created by Docker on first `up`.
+#
+# Port policy: the reverse proxy (80/443) and user-facing UIs (VTS :9113,
+# CrowdSec web UI, Certwarden :4050/:4055) bind all interfaces — gate
+# them at your HOST FIREWALL. Internal/sensitive ports stay loopback:
+# CrowdSec LAPI :8080, Certwarden ACME :4060 + pprof :4065/:4070.
+#
+# First run: cp .env.example .env && $EDITOR .env, then docker compose up
+# -d. /etc/nginx is seeded by the image on first start when empty.
+
+services:
+
+  nginx:
+    image: ghcr.io/buco7854/nginx:latest
+    container_name: nginx
+    restart: unless-stopped
+    # no-new-privileges: blocks setuid-root escalation. Safe — it does
+    # NOT block nginx's master->worker privilege DROP.
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9113:9113"             # VTS dashboard /status — firewall-gated
+    volumes:
+      - ./nginx/conf:/etc/nginx                 # seeded by image if empty
+      - ./nginx/logs:/var/log/nginx             # nginx writes; crowdsec reads
+      - ./nginx/nginx-ui:/etc/nginx-ui          # nginx-ui sqlite DB + app.ini
+      - ./certwarden/certs:/etc/ssl/domains:ro  # certs certwarden issued
+      - ./nginx/crowdsec-nginx-bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
+      - ./nginx/www:/var/www                    # static files (security.txt …)
+    environment:
+      - TZ=${TZ}
+      # nginx + nginx-ui share this container, so nginx-ui drives the
+      # local nginx with plain commands — it does NOT need the Docker
+      # socket (only used for cross-container control / OTA container-
+      # replacement). Opt out so it doesn't require/nag a missing socket.
+      - NGINX_UI_IGNORE_DOCKER_SOCKET=true
+    networks:
+      - proxy_net
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    volumes:
+      - ./crowdsec/conf:/etc/crowdsec           # authored config + hub installs
+      - ./crowdsec/data:/var/lib/crowdsec/data  # LAPI state DB
+      - ./nginx/logs:/var/log/nginx:ro
+    environment:
+      - TZ=${TZ}
+      # Each collection pulls its own parsers/scenarios/appsec-rules, so
+      # listing collections is enough. nginx/http*/wordpress/appsec* are
+      # driven by this stack's acquis; linux/sshd/synology-dsm install
+      # but stay inert until you add their log sources to acquis.yaml.
+      - COLLECTIONS=crowdsecurity/nginx crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/http-dos crowdsecurity/wordpress crowdsecurity/whitelist-good-actors crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules crowdsecurity/appsec-wordpress crowdsecurity/appsec-crs crowdsecurity/linux crowdsecurity/sshd crowdsecurity/synology-dsm
+      # Both bouncer keys auto-register with LAPI on first start.
+      - BOUNCER_KEY_nginx=${CROWDSEC_BOUNCER_API_KEY}
+      - BOUNCER_KEY_firewall=${CROWDSEC_FW_BOUNCER_API_KEY}
+    ports:
+      - "127.0.0.1:8080:8080"   # LAPI — loopback (fw bouncer uses host net)
+    expose:
+      - "7422"                  # AppSec listener — compose net only
+    networks:
+      - proxy_net
+
+  crowdsec-firewall-bouncer:
+    # No official upstream image (host package only) — built from the
+    # GPG-verified .deb by this repo (see ../../crowdsec-firewall-bouncer).
+    image: ghcr.io/buco7854/crowdsec-firewall-bouncer:latest
+    container_name: crowdsec-firewall-bouncer
+    restart: unless-stopped
+    # host network to rewrite the host's iptables; reaches LAPI via the
+    # loopback-published 127.0.0.1:8080. NET_ADMIN only (iptables/ipset).
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro
+    depends_on:
+      - crowdsec
+
+  crowdsec-web-ui:
+    image: ghcr.io/theduffman85/crowdsec-web-ui:latest
+    container_name: crowdsec_web_ui
+    restart: unless-stopped
+    ports:
+      - "${CROWDSEC_UI_PORT}:3000"   # web UI — firewall-gated
+    environment:
+      # Single stack: reach LAPI over proxy_net as crowdsec:8080.
+      - CROWDSEC_URL=${CROWDSEC_API_URL}
+      - CROWDSEC_USER=${CROWDSEC_UI_USER}
+      - CROWDSEC_PASSWORD=${CROWDSEC_UI_PASSWORD}
+      - CROWDSEC_LOOKBACK_PERIOD=${CROWDSEC_LOOKBACK}
+      - CROWDSEC_REFRESH_INTERVAL=${CROWDSEC_REFRESH}
+      - CROWDSEC_IDLE_REFRESH_INTERVAL=${CROWDSEC_IDLE_REFRESH}
+      - CROWDSEC_IDLE_THRESHOLD=${CROWDSEC_IDLE_LIMIT}
+      - CROWDSEC_FULL_REFRESH_INTERVAL=${CROWDSEC_CACHE_REFRESH}
+      - CROWDSEC_ALERT_INCLUDE_ORIGINS=${CROWDSEC_ALERT_INCLUDE_ORIGINS}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGINS=${CROWDSEC_ALERT_EXCLUDE_ORIGINS}
+      - CROWDSEC_ALERT_INCLUDE_CAPI=${CROWDSEC_ALERT_INCLUDE_CAPI}
+      - CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_INCLUDE_ORIGIN_EMPTY}
+      - CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY=${CROWDSEC_ALERT_EXCLUDE_ORIGIN_EMPTY}
+    volumes:
+      - ${CROWDSEC_UI_DATA_PATH}:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - crowdsec
+    networks:
+      - proxy_net
+
+  certwarden:
+    image: ghcr.io/gregtwallace/certwarden:latest
+    container_name: certwarden
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "4050:4050"             # server UI (http)  — firewall-gated
+      - "4055:4055"             # server UI (https) — firewall-gated
+      - "127.0.0.1:4060:4060"   # ACME http-01 — internal (nginx proxies it)
+      - "127.0.0.1:4065:4065"   # pprof (http)  — loopback (sensitive)
+      - "127.0.0.1:4070:4070"   # pprof (https) — loopback (sensitive)
+    volumes:
+      - ./certwarden/data:/app/data
+      - ./certwarden/scripts:/scripts:ro   # post-issuance hook
+      - ./certwarden/certs:/certs          # writes /certs/<name>/{fullchain,privkey}.pem
+    networks:
+      - proxy_net
+
+networks:
+  proxy_net:
+    driver: bridge

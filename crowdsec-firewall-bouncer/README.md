@@ -25,7 +25,7 @@ Same supply-chain posture as this repo's nginx image:
   self-register against a local LAPI — neither makes sense (or works) in
   a container. The static Go binary is run directly.
 - The `-iptables` variant is pulled (the stack's
-  `crowdsec_firewall-bouncer.yaml` uses `mode: iptables`); `iptables` +
+  `crowdsec-firewall-bouncer.yaml` uses `mode: iptables`); `iptables` +
   `ipset` (its real runtime deps) come straight from Debian.
 - A build-time `crowdsec-firewall-bouncer -V` smoke test runs the binary
   on the **target arch** under QEMU — fail-loud, like the nginx image's
@@ -42,18 +42,18 @@ Same supply-chain posture as this repo's nginx image:
 
 ## Usage
 
-Already wired into [`../nginx/docker-compose.yml`](../nginx/docker-compose.yml):
+Already wired into [`../nginx/example/docker-compose.yml`](../nginx/example/docker-compose.yml):
 it runs `network_mode: host` with `cap_add: NET_ADMIN` (the only cap it
 needs — it edits iptables/ipset via netlink and opens no raw sockets) so
 it can write the host's iptables, reaches LAPI via the loopback-published
 `127.0.0.1:8080`, and bind-mounts
-[`../nginx/crowdsec_firewall-bouncer.yaml`](../nginx/crowdsec_firewall-bouncer.yaml)
+[`../nginx/example/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml`](../nginx/example/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml)
 over the image's default config. Standalone:
 
 ```bash
 docker run -d --name crowdsec-firewall-bouncer \
   --network host --cap-add NET_ADMIN \
-  -v $PWD/crowdsec_firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro \
+  -v $PWD/crowdsec-firewall-bouncer.yaml:/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml:ro \
   ghcr.io/buco7854/crowdsec-firewall-bouncer:latest
 ```
 

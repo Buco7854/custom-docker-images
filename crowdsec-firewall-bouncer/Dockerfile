@@ -17,7 +17,7 @@
 # works) in a container; we run the static binary directly instead.
 #
 # We pull the `-iptables` variant because the stack's
-# crowdsec_firewall-bouncer.yaml uses `mode: iptables`; iptables + ipset
+# crowdsec-firewall-bouncer.yaml uses `mode: iptables`; iptables + ipset
 # (its real runtime deps) come straight from Debian. Build the nftables
 # flavour with --build-arg CS_FW_BOUNCER_FLAVOR=nftables (also flip
 # `mode:` in the yaml) — then nftables is the dep instead.
@@ -86,7 +86,7 @@ RUN set -eux; \
     # The .deb installs /usr/bin/crowdsec-firewall-bouncer (static Go
     # binary) + a default .yaml. Put the binary on PATH and keep the
     # .deb's default config as a standalone fallback — the stack
-    # bind-mounts its own crowdsec_firewall-bouncer.yaml over this path,
+    # bind-mounts its own crowdsec-firewall-bouncer.yaml over this path,
     # but a sane default lets the image run without compose too.
     BIN=/tmp/bouncer/usr/bin/crowdsec-firewall-bouncer; \
     [ -x "$BIN" ] \
