@@ -62,7 +62,10 @@ lives). It's **one directory per service** (`nginx/`, `crowdsec/`,
 `crowdsec-firewall-bouncer/`, `crowdsec-web-ui/`, `certwarden/`), each
 holding that service's mounts; tracked files (the bouncer configs,
 `crowdsec/conf/`) are pre-shipped, runtime dirs are auto-created on
-first `up`. Two ways in:
+first `up`. **Two mounts are deliberate exceptions — absolute host
+paths, not relative:** `/var/www` (static web root) and
+`/etc/ssl/domains` (TLS certs), because they're shared host system
+locations other services on the box may also use. Two ways in:
 
 - **[Path A — fresh install](#path-a--fresh-install)** — clean machine,
   nothing to keep; the container seeds a working nginx config for you.
@@ -92,7 +95,11 @@ Both finish at [Open the UIs](#open-the-uis). Do the
   registrations are not reused (see Path B).
 
 Runtime dirs (`nginx/conf`, `nginx/logs`, `*/data`, …) are created by
-Docker on first `up`; you don't `mkdir` anything.
+Docker on first `up`; you don't `mkdir` anything. The two absolute
+host paths — `/var/www` and `/etc/ssl/domains` — Docker also creates
+if absent, but on a real host they're shared system locations: point
+them at your actual web root / cert store (and `sudo mkdir -p` them
+yourself if you want non-root ownership).
 
 ### Path A — fresh install
 
@@ -359,9 +366,9 @@ them:
   — connection/request rate-limit zones, opted into per-server with
   `include snippets/ratelimit.conf;` inside a `server {}`.
 - `optional/snippets/security-txt.conf` — serves
-  `/.well-known/security.txt`; edit `www/well-known/security.txt`
-  (already bind-mounted at `/var/www`) for your contact details, opt in
-  per-server the same way.
+  `/.well-known/security.txt`. Copy the repo's sample
+  (`nginx/www/well-known/security.txt`) into the host `/var/www` and
+  edit it for your contact details, opt in per-server the same way.
 - `optional/conf.d/vhost-traffic-status.conf` — the VTS zone + the
   `:9113/status` traffic dashboard. The VTS module is already loaded
   (auto-seeded `90-` symlink); copy this into your `conf.d/` to
@@ -413,22 +420,23 @@ machine is registered once during [Setup](#setup).
 ### Mount layout
 
 Container paths are **absolute Debian-style** (stock nginx); the host
-side is **relative to `nginx/example/`** so the stack is self-contained:
+side is **relative to `nginx/example/`** (per-service) — except the two
+shared host system paths, which are **absolute**:
 
-| Container | Host (`./` = `nginx/example/`) | Notes |
+| Container | Host | Notes |
 |---|---|---|
 | `/etc/nginx` | `nginx/conf` | seeded by image if empty; runtime |
 | `/var/log/nginx` | `nginx/logs` | nginx writes; crowdsec reads it RO |
 | `/etc/nginx-ui` | `nginx/nginx-ui` | nginx-ui sqlite DB + `app.ini`; runtime |
 | `/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf` | `nginx/crowdsec-nginx-bouncer.conf` | **tracked** — set `API_KEY` |
-| `/var/www` | `nginx/www` | **tracked** sample (`security.txt`) |
 | `/etc/crowdsec` | `crowdsec/conf` | **tracked** — acquis, whitelists, profiles |
 | `/var/lib/crowdsec/data` | `crowdsec/data` | LAPI state DB; runtime |
 | `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml` | `crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml` | **tracked** — set `api_key` |
 | `/app/data` (web UI) | `crowdsec-web-ui/data` | runtime |
 | `/app/data` (certwarden) | `certwarden/data` | runtime |
-| `/certs` & `/etc/ssl/domains` (RO in nginx) | `certwarden/certs` | certwarden issues; runtime |
 | `/scripts` | `certwarden/scripts` | **tracked** (post-issuance hook) |
+| `/var/www` | **`/var/www`** | **ABSOLUTE host path** (shared); repo ships a `security.txt` sample at `nginx/www/` to copy here |
+| `/etc/ssl/domains` (nginx RO) & `/certs` (certwarden RW) | **`/etc/ssl/domains`** | **ABSOLUTE host path** (shared); certwarden issues, nginx reads |
 
 One directory per service; each owns what it produces (logs → `nginx/`,
 certs/scripts → `certwarden/`). **Tracked** = pre-shipped, you edit it;
@@ -462,8 +470,9 @@ The script expects these env vars (Certwarden passes them, plus
 
 The hook writes `fullchain.pem`/`privkey.pem` under
 `/certs/<CERTIFICATE_NAME>/` in the certwarden container. That `/certs`
-mount is the host's `certwarden/certs`, which nginx reads back read-only at
-`/etc/ssl/domains`. It then `POST`s `http://nginx/api/nginx/reload` with
+mount is the host's **`/etc/ssl/domains`** (absolute, shared), which
+nginx reads back read-only at the same `/etc/ssl/domains`. It then
+`POST`s `http://nginx/api/nginx/reload` with
 the `X-API-Key` header to trigger `nginx -s reload`. (Override
 `CERT_ROOT` if you remap that mount.)
 
@@ -577,7 +586,7 @@ nginx/
     ├── nginx/
     │   ├── crowdsec-nginx-bouncer.conf   # tracked — set API_KEY
     │   ├── maintenance_nginx_ui.sh       # tracked — host cron helper
-    │   ├── www/well-known/security.txt   # tracked sample → /var/www
+    │   ├── www/well-known/security.txt   # tracked sample — copy to host /var/www
     │   ├── optional/                     # tracked — opt-in snippets:
     │   │   ├── conf.d/{ratelimit, vhost-traffic-status}.conf
     │   │   └── snippets/{ratelimit, security-txt}.conf
@@ -593,6 +602,9 @@ nginx/
     ├── crowdsec-web-ui/data/             # (rt) → /app/data
     └── certwarden/
         ├── scripts/write_cert.sh         # tracked — issuance hook
-        ├── data/                         # (rt) → /app/data
-        └── certs/                        # (rt) certwarden issues; nginx RO
+        └── data/                         # (rt) → /app/data
+
+ABSOLUTE host paths (not under example/, shared with the host):
+  /var/www           static web root  (sample: nginx/www/ — copy here)
+  /etc/ssl/domains   TLS certs        (certwarden writes, nginx reads RO)
 ```

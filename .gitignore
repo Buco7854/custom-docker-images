@@ -12,4 +12,3 @@ nginx/example/nginx/nginx-ui/
 nginx/example/crowdsec/data/
 nginx/example/crowdsec-web-ui/data/
 nginx/example/certwarden/data/
-nginx/example/certwarden/certs/

@@ -3,15 +3,20 @@
 # · certwarden. nginx traffic = the VTS dashboard at :9113/status; CrowdSec
 # has its own web UI — no Prometheus/Grafana.
 #
-# Layout: one directory per service (paths are relative to THIS file).
-# Each service owns what it produces; shared mounts point at the owner:
+# Layout: one directory per service (paths relative to THIS file).
+# Each service owns what it produces:
 #   nginx/      conf/ (→ /etc/nginx, seeded if empty), logs/, nginx-ui/,
-#               www/, crowdsec-nginx-bouncer.conf (tracked — set API_KEY)
+#               crowdsec-nginx-bouncer.conf (tracked — set API_KEY)
 #   crowdsec/   conf/ (tracked — acquis/profiles/whitelists), data/
 #   crowdsec-firewall-bouncer/  crowdsec-firewall-bouncer.yaml (tracked)
 #   crowdsec-web-ui/  data/
-#   certwarden/ data/, certs/ (nginx reads RO), scripts/ (issuance hook)
+#   certwarden/ data/, scripts/ (issuance hook)
 # Runtime dirs are created by Docker on first `up`.
+#
+# EXCEPTION — two ABSOLUTE host paths (NOT relative), because they're
+# shared host system locations other services on the box may also use:
+#   /var/www           static web root (nginx serves it)
+#   /etc/ssl/domains   TLS certs (certwarden writes, nginx reads RO)
 #
 # Port policy: the reverse proxy (80/443) and user-facing UIs (VTS :9113,
 # CrowdSec web UI, Certwarden :4050/:4055) bind all interfaces — gate
@@ -39,9 +44,9 @@ services:
       - ./nginx/conf:/etc/nginx                 # seeded by image if empty
       - ./nginx/logs:/var/log/nginx             # nginx writes; crowdsec reads
       - ./nginx/nginx-ui:/etc/nginx-ui          # nginx-ui sqlite DB + app.ini
-      - ./certwarden/certs:/etc/ssl/domains:ro  # certs certwarden issued
+      - /etc/ssl/domains:/etc/ssl/domains:ro    # ABSOLUTE host path (shared)
       - ./nginx/crowdsec-nginx-bouncer.conf:/etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf
-      - ./nginx/www:/var/www                    # static files (security.txt …)
+      - /var/www:/var/www                       # ABSOLUTE host path (shared)
     environment:
       - TZ=${TZ}
       # nginx + nginx-ui share this container, so nginx-ui drives the
@@ -138,7 +143,7 @@ services:
     volumes:
       - ./certwarden/data:/app/data
       - ./certwarden/scripts:/scripts:ro   # post-issuance hook
-      - ./certwarden/certs:/certs          # writes /certs/<name>/{fullchain,privkey}.pem
+      - /etc/ssl/domains:/certs            # ABSOLUTE host path; writes /certs/<name>/{fullchain,privkey}.pem
     networks:
       - proxy_net
 
