@@ -16,6 +16,18 @@ log_level: info
 api_url: http://127.0.0.1:8080/
 api_key: REPLACE_WITH_CROWDSEC_FW_BOUNCER_API_KEY
 
+# false: the bouncer enforces IPv6 bans too (ip6tables). Needed because
+# non-HTTP dockerised services (e.g. SFTP) are exposed publicly over
+# IPv6 — the nginx Lua bouncer only covers HTTP, so without v6 firewall
+# bans a banned IP could reach those services over IPv6.
+# REQUIRES Docker's IPv6 firewall enabled on the host, or the v6
+# `ip6tables -I DOCKER-USER -j CROWDSEC_CHAIN` jump fails (Docker only
+# creates the v6 DOCKER-USER chain when its IPv6 firewall is on, and
+# DOCKER-USER — not INPUT/FORWARD — governs container-published ports).
+# Enable once in /etc/docker/daemon.json:
+#   { "ipv6": true, "fixed-cidr-v6": "fd00:dead:beef::/48",
+#     "ip6tables": true }
+# then `systemctl restart docker` and recreate the stack.
 disable_ipv6: false
 deny_action: DROP
 deny_log: false

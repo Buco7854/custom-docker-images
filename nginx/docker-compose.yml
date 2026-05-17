@@ -8,9 +8,12 @@
 # nginx traffic is the VTS HTML dashboard at :9113/status; CrowdSec has
 # its own web UI — there is no Prometheus/Grafana.
 #
-# Non-web ports bind to 127.0.0.1 only so nothing except 80/443 leaks
-# onto the LAN. Services share `proxy_net` (except the firewall bouncer,
-# which uses host networking so it can rewrite iptables).
+# The reverse proxy (80/443) and user-facing UIs (VTS :9113, CrowdSec
+# web UI, Certwarden UI :4050/:4055) bind to all interfaces — gate them
+# at your HOST FIREWALL. Internal/sensitive ports stay loopback-only:
+# CrowdSec LAPI :8080, Certwarden ACME :4060 + pprof :4065/:4070.
+# Services share `proxy_net` (except the firewall bouncer, which uses
+# host networking so it can rewrite iptables).
 #
 # Host paths (canonical Debian layout):
 #   /etc/nginx           nginx config (bind-mounted into the nginx container)
@@ -31,10 +34,19 @@ services:
     image: ghcr.io/buco7854/nginx:latest
     container_name: nginx
     restart: unless-stopped
+    # nginx master + nginx-ui run as root in-container (privileged ports,
+    # master setuids workers down to `nginx`, nginx-ui edits /etc/nginx
+    # and signals the master). Can't drop that without forking the
+    # upstream image. no-new-privileges is the zero-breakage hardening:
+    # it blocks gaining privileges via setuid-root binaries but does NOT
+    # block nginx's master→worker privilege DROP (a setuid() syscall, not
+    # an execve of a setuid binary), so nothing breaks.
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "80:80"
       - "443:443"
-      - "127.0.0.1:9113:9113"   # VTS HTML dashboard (/status) — loopback only
+      - "9113:9113"             # VTS HTML dashboard (/status) — firewall-gated
     volumes:
       - /etc/nginx:/etc/nginx
       - /var/log/nginx:/var/log/nginx
@@ -44,6 +56,13 @@ services:
       - /var/www:/var/www                                         # static files (security.txt etc.)
     environment:
       - TZ=${TZ}
+      # nginx + nginx-ui share THIS container, so nginx-ui drives its
+      # local nginx with plain commands (nginx -t / -s reload / restart,
+      # auto-detected paths) — it does NOT need the Docker socket. The
+      # socket is only for controlling nginx in ANOTHER container or for
+      # OTA "container replacement" upgrades, neither of which apply
+      # here. Opt out so nginx-ui doesn't require/nag a missing socket.
+      - NGINX_UI_IGNORE_DOCKER_SOCKET=true
     networks:
       - proxy_net
 
@@ -102,7 +121,7 @@ services:
     container_name: crowdsec_web_ui
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${CROWDSEC_UI_PORT}:3000"
+      - "${CROWDSEC_UI_PORT}:3000"
     environment:
       # In this single stack the web UI reaches LAPI over proxy_net as
       # `crowdsec:8080`. (Upstream's host.docker.internal:8080 only works
@@ -136,11 +155,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:4050:4050"   # server interface (http)
-      - "127.0.0.1:4055:4055"   # server interface (https)
-      - "127.0.0.1:4060:4060"   # http-01 challenge server (http)
-      - "127.0.0.1:4065:4065"   # pprof debug server (http)
-      - "127.0.0.1:4070:4070"   # pprof debug server (https)
+      - "4050:4050"             # server interface (http) — firewall-gated
+      - "4055:4055"             # server interface (https) — firewall-gated
+      - "127.0.0.1:4060:4060"   # http-01 challenge server — internal (nginx proxies ACME)
+      - "127.0.0.1:4065:4065"   # pprof debug server (http) — loopback-only (sensitive)
+      - "127.0.0.1:4070:4070"   # pprof debug server (https) — loopback-only (sensitive)
     volumes:
       - ./certwarden_data:/app/data
       - ./scripts:/scripts:ro                # post-issuance hook lives here

@@ -65,8 +65,10 @@ Both finish at [Open the UIs](#open-the-uis). Do the
 ### Prerequisites
 
 - Docker + Docker Compose v2.
-- Ports `80`/`443` free on the host (everything else binds to
-  `127.0.0.1` only).
+- Ports `80`/`443` free on the host. User-facing UIs (VTS `9113`,
+  CrowdSec web UI, Certwarden `4050`/`4055`) also bind to all
+  interfaces — **gate them at your host firewall**; internal/sensitive
+  ports stay loopback-only.
 - Create the host dirs (the nginx container uses absolute Debian-style
   paths — see [Host paths](#host-paths)):
   ```bash
@@ -390,7 +392,7 @@ your `/etc/nginx/` only if you want them:
 │  nginx (buco7854/nginx)                             │
 │  stock nginx + lua module (CrowdSec bouncer,        │
 │  incl. AppSec) + VTS HTML dashboard + nginx-ui      │
-│  VTS dashboard → :9113/status  (HTML, loopback)     │
+│  VTS dashboard → :9113/status  (HTML dashboard)     │
 └──┬───────────────┬──────────────────────────────────┘
    │ access/error  │ AppSec WAF
    ▼               ▼
@@ -410,9 +412,11 @@ certwarden :4055 ──writes /certs/──▶ host /etc/ssl/domains/
                  ──POST reload────▶  nginx /api/nginx/reload
 ```
 
-Everything except 80/443 binds to `127.0.0.1` only — nothing on the LAN
-can talk to LAPI, the CrowdSec UI, the VTS dashboard, or Certwarden's
-ports. All services share the `proxy_net` bridge network and resolve
+The reverse proxy (80/443) and the user-facing UIs — VTS dashboard
+`:9113`, CrowdSec web UI, Certwarden UI `:4050`/`:4055` — bind to all
+interfaces; **gate them at your host firewall**. Internal/sensitive
+ports stay loopback-only: CrowdSec LAPI `:8080`, Certwarden ACME
+`:4060` and pprof `:4065`/`:4070`. All services share the `proxy_net` bridge network and resolve
 each other by service name — except the firewall bouncer, which runs
 with `network_mode: host` so it can rewrite iptables, and reaches LAPI
 via the loopback-published `127.0.0.1:8080`.
